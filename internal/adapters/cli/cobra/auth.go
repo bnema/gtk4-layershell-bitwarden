@@ -25,6 +25,8 @@ type authOptions struct {
 	passwordEnv  string
 	passwordFile string
 	noSync       bool
+	region       string
+	serverURL    string
 }
 
 type statusResponse struct {
@@ -45,6 +47,8 @@ func newLoginCmd(opts Options, cachePath, outboxPath string) *cobra.Command {
 		},
 	}
 	addAuthFlags(cmd, &auth)
+	cmd.Flags().StringVar(&auth.region, "region", "", "Bitwarden region: us, eu, or self_hosted")
+	cmd.Flags().StringVar(&auth.serverURL, "server-url", "", "Self-hosted Bitwarden server URL (https://...) when --region self_hosted")
 	return cmd
 }
 
@@ -93,6 +97,9 @@ func runLoginUnlock(cmd *cobra.Command, opts Options, cachePath, outboxPath stri
 		if len(args) > 1 {
 			passwordArgs = []string{args[1]}
 		}
+		if err := resolveLoginRegion(cmd, cfg, auth); err != nil {
+			return err
+		}
 	} else if strings.TrimSpace(email) == "" {
 		return fmt.Errorf("no configured email; run `gtk4-layershell-bitwarden login <email>` first or set bitwarden.email")
 	}
@@ -102,10 +109,13 @@ func runLoginUnlock(cmd *cobra.Command, opts Options, cachePath, outboxPath stri
 		return err
 	}
 
-	if login && cfg.Bitwarden.Email != email {
+	if login {
 		cfg.Bitwarden.Email = email
+		if err := coreconfig.Validate(cfg); err != nil {
+			return err
+		}
 		if err := mgr.Save(cmd.Context(), cfg); err != nil {
-			return fmt.Errorf("save email: %w", err)
+			return fmt.Errorf("save login config: %w", err)
 		}
 	}
 
@@ -141,6 +151,47 @@ func runLoginUnlock(cmd *cobra.Command, opts Options, cachePath, outboxPath stri
 	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "$ export BW_SESSION=%q\n", session)
 	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "> $env:BW_SESSION=%q\n", session)
 	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "\nYou can also pass the session key to compatible commands with `--session` in future releases.\n")
+	return nil
+}
+
+func resolveLoginRegion(cmd *cobra.Command, cfg *coreconfig.Config, auth authOptions) error {
+	region := strings.TrimSpace(auth.region)
+	if region == "" {
+		current := string(cfg.Bitwarden.Region)
+		if current == "" {
+			current = string(coreconfig.RegionUS)
+		}
+		answer, err := promptLine(cmd.InOrStdin(), cmd.ErrOrStderr(), fmt.Sprintf("Bitwarden region [us/eu/self_hosted] (%s): ", current))
+		if err != nil {
+			return err
+		}
+		region = strings.TrimSpace(answer)
+		if region == "" {
+			region = current
+		}
+	}
+
+	switch coreconfig.Region(region) {
+	case coreconfig.RegionUS, coreconfig.RegionEU:
+		cfg.Bitwarden.Region = coreconfig.Region(region)
+		cfg.Bitwarden.ServerURL = ""
+	case coreconfig.RegionSelfHosted:
+		cfg.Bitwarden.Region = coreconfig.RegionSelfHosted
+		serverURL := strings.TrimSpace(auth.serverURL)
+		if serverURL == "" {
+			serverURL = strings.TrimSpace(cfg.Bitwarden.ServerURL)
+		}
+		if serverURL == "" {
+			prompted, err := promptLine(cmd.InOrStdin(), cmd.ErrOrStderr(), "Self-hosted server URL (https://...): ")
+			if err != nil {
+				return err
+			}
+			serverURL = strings.TrimSpace(prompted)
+		}
+		cfg.Bitwarden.ServerURL = serverURL
+	default:
+		return fmt.Errorf("unsupported region %q: expected us, eu, or self_hosted", region)
+	}
 	return nil
 }
 

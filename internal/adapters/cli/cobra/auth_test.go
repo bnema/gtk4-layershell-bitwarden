@@ -82,7 +82,7 @@ func TestLoginRawUnlocksAndSavesEmail(t *testing.T) {
 		},
 	}
 
-	out, err := executeCmd(t, opts, []string{"login", "me@example.com", "master-password", "--raw", "--no-sync"})
+	out, err := executeCmd(t, opts, []string{"login", "me@example.com", "master-password", "--raw", "--no-sync", "--region", "us"})
 	require.NoError(t, err)
 	require.Equal(t, "me@example.com", fake.email)
 	require.Equal(t, "master-password", fake.password)
@@ -94,6 +94,38 @@ func TestLoginRawUnlocksAndSavesEmail(t *testing.T) {
 	getOut, err := executeCmd(t, opts, []string{"config", "get", "bitwarden.email"})
 	require.NoError(t, err)
 	require.Equal(t, "me@example.com\n", getOut)
+}
+
+func TestLoginSavesRegionAndSelfHostedServerURL(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.toml")
+	fake := newFakeAuthService()
+	opts := Options{
+		ConfigPath: configPath,
+		ComposeService: func(context.Context, *coreconfig.Config, string, string) (in.AppService, error) {
+			return fake, nil
+		},
+	}
+
+	_, err := executeCmd(t, opts, []string{"login", "me@example.com", "master-password", "--raw", "--no-sync", "--region", "self_hosted", "--server-url", "https://bitwarden.example.com"})
+	require.NoError(t, err)
+
+	region, err := executeCmd(t, opts, []string{"config", "get", "bitwarden.region"})
+	require.NoError(t, err)
+	require.Equal(t, "self_hosted\n", region)
+	serverURL, err := executeCmd(t, opts, []string{"config", "get", "bitwarden.server_url"})
+	require.NoError(t, err)
+	require.Equal(t, "https://bitwarden.example.com\n", serverURL)
+}
+
+func TestLoginRejectsInvalidRegion(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.toml")
+	opts := Options{ConfigPath: configPath}
+
+	_, err := executeCmd(t, opts, []string{"login", "me@example.com", "master-password", "--raw", "--no-sync", "--region", "mars"})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "unsupported region")
 }
 
 func TestUnlockUsesConfiguredEmail(t *testing.T) {

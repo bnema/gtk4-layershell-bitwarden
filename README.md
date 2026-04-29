@@ -86,17 +86,21 @@ the config can be written later through the CLI or GUI.
 The CLI mirrors the official Bitwarden CLI shape for local auth commands:
 
 ```sh
-gtk4-layershell-bitwarden login you@example.com
+gtk4-layershell-bitwarden login you@example.com --region us
+gtk4-layershell-bitwarden login you@example.com --region eu
+gtk4-layershell-bitwarden login you@example.com --region self_hosted --server-url https://vault.example.com
 gtk4-layershell-bitwarden unlock
 gtk4-layershell-bitwarden status
 gtk4-layershell-bitwarden lock
 gtk4-layershell-bitwarden logout
 ```
 
-`login` prompts for missing email and master password, authenticates with
-Bitwarden, stores the email in config, runs initial sync, and writes the
-encrypted cache/outbox under the XDG cache directory. `unlock` uses the
-configured email and prompts for the master password. Both commands support:
+`login` prompts for missing email, region (`us`, `eu`, or `self_hosted`),
+self-hosted server URL when needed, and master password. It authenticates with
+Bitwarden, stores the email/region/server URL in config, runs initial sync, and
+writes the encrypted cache/outbox under the XDG cache directory. `unlock` uses
+the configured email/region and prompts for the master password. Both commands
+support:
 
 ```sh
 --raw                 # print only a generated session key
@@ -110,9 +114,12 @@ export. For v0.1.0, this session key is process-local guidance for CLI
 compatibility; persistent vault protection remains the master-password-derived
 encrypted cache key, and the GUI still prompts for the master password.
 
-If the GTK overlay is launched outside a layer-shell-capable Wayland session,
-the command exits with guidance to use `login`, `unlock`, or `status` from the
-terminal instead.
+On Wayland, the launcher re-execs itself with `libgtk4-layer-shell.so.0` in
+`LD_PRELOAD` before GTK initializes. This matches the sekeve bootstrap and is
+needed on compositors such as Niri where gtk4-layer-shell's GDK hook must be
+loaded before GTK. If the GTK overlay is still launched outside a layer-shell-
+capable Wayland session, the command exits with guidance to use `login`,
+`unlock`, or `status` from the terminal instead.
 
 ---
 

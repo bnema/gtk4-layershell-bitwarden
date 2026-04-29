@@ -12,6 +12,7 @@ import (
 	cachefile "github.com/bnema/gtk4-layershell-bitwarden/internal/adapters/cache/file"
 	viperadapter "github.com/bnema/gtk4-layershell-bitwarden/internal/adapters/config/viper"
 	"github.com/bnema/gtk4-layershell-bitwarden/internal/adapters/gui/gtk"
+	"github.com/bnema/gtk4-layershell-bitwarden/internal/adapters/gui/layershell"
 	loggeradapter "github.com/bnema/gtk4-layershell-bitwarden/internal/adapters/logging"
 	"github.com/bnema/gtk4-layershell-bitwarden/internal/adapters/paths/xdg"
 	remoteadapter "github.com/bnema/gtk4-layershell-bitwarden/internal/adapters/remote/bitwarden"
@@ -38,6 +39,7 @@ func NewRootCommand(opts Options) *cobra.Command {
 		Use:   "gtk4-layershell-bitwarden",
 		Short: "Bitwarden desktop client for GTK4 layershell",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			layershell.EnsurePreloaded()
 			cmd.Println(fmt.Sprintf("gtk4-layershell-bitwarden %s", opts.Version))
 
 			// Load config; tolerate missing email for first-run scenarios.
