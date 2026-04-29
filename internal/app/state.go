@@ -6,6 +6,7 @@ import (
 
 	"github.com/bnema/gtk4-layershell-bitwarden/internal/core/auth"
 	"github.com/bnema/gtk4-layershell-bitwarden/internal/core/config"
+	coresync "github.com/bnema/gtk4-layershell-bitwarden/internal/core/sync"
 	"github.com/bnema/gtk4-layershell-bitwarden/internal/core/vault"
 	"github.com/bnema/gtk4-layershell-bitwarden/internal/ports/out"
 )
@@ -15,6 +16,8 @@ type Deps struct {
 	Remote    out.RemoteVault
 	Cache     out.CacheStore
 	SecretBox out.SecretBox
+	Outbox    out.OutboxStore
+	Clock     out.Clock
 	Config    *config.Config
 }
 
@@ -25,6 +28,8 @@ type Service struct {
 	state         auth.LockState
 	items         []vault.Item
 	folders       []vault.Folder
+	outbox        []coresync.OutboxMutation
+	conflicts     []coresync.Conflict
 	index         *vault.SearchIndex
 	events        chan Event
 	cancelWorkers context.CancelFunc
