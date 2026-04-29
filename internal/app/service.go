@@ -341,6 +341,25 @@ func (s *Service) appendOutboxLocked(kind coresync.MutationKind, itemID string, 
 	return m
 }
 
+// removeReplayedOutboxLocked removes only the mutations that were replayed.
+// The caller must hold s.mu.
+func (s *Service) removeReplayedOutboxLocked(replayed []coresync.OutboxMutation) {
+	if len(replayed) == 0 || len(s.outbox) == 0 {
+		return
+	}
+	replayedIDs := make(map[string]struct{}, len(replayed))
+	for _, mutation := range replayed {
+		replayedIDs[mutation.ID] = struct{}{}
+	}
+	kept := s.outbox[:0]
+	for _, mutation := range s.outbox {
+		if _, ok := replayedIDs[mutation.ID]; !ok {
+			kept = append(kept, mutation)
+		}
+	}
+	s.outbox = kept
+}
+
 // saveCacheAsyncLocked snapshots the outbox and cacheKey, then
 // asynchronously persists to deps.Outbox if available.
 // The caller MUST hold s.mu.
@@ -381,6 +400,10 @@ func (s *Service) Create(ctx context.Context, item vault.Item) (vault.Item, erro
 		remoteItem, err := s.deps.Remote.Create(ctx, item)
 		if err == nil {
 			s.mu.Lock()
+			if err := s.ensureUnlocked(); err != nil {
+				s.mu.Unlock()
+				return vault.Item{}, err
+			}
 			remoteItem.SyncStatus = vault.SyncStatusSynced
 			s.items = append(s.items, remoteItem)
 			s.rebuildIndexLocked()
@@ -393,6 +416,9 @@ func (s *Service) Create(ctx context.Context, item vault.Item) (vault.Item, erro
 	// Remote missing or error: queue pending locally.
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := s.ensureUnlocked(); err != nil {
+		return vault.Item{}, err
+	}
 
 	if item.ID == "" {
 		item.ID = fmt.Sprintf("local-%d", s.now().UnixNano())
@@ -423,6 +449,10 @@ func (s *Service) Update(ctx context.Context, id string, item vault.Item) (vault
 		remoteItem, err := s.deps.Remote.Update(ctx, id, item)
 		if err == nil {
 			s.mu.Lock()
+			if err := s.ensureUnlocked(); err != nil {
+				s.mu.Unlock()
+				return vault.Item{}, err
+			}
 			remoteItem.SyncStatus = vault.SyncStatusSynced
 			for i, existing := range s.items {
 				if existing.ID == id {
@@ -439,6 +469,9 @@ func (s *Service) Update(ctx context.Context, id string, item vault.Item) (vault
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := s.ensureUnlocked(); err != nil {
+		return vault.Item{}, err
+	}
 
 	item.ID = id
 	item.SyncStatus = vault.SyncStatusPending
@@ -476,6 +509,10 @@ func (s *Service) Trash(ctx context.Context, id string) error {
 		err := s.deps.Remote.Trash(ctx, id)
 		if err == nil {
 			s.mu.Lock()
+			if err := s.ensureUnlocked(); err != nil {
+				s.mu.Unlock()
+				return err
+			}
 			for i, existing := range s.items {
 				if existing.ID == id {
 					s.items[i].Deleted = true
@@ -492,6 +529,9 @@ func (s *Service) Trash(ctx context.Context, id string) error {
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := s.ensureUnlocked(); err != nil {
+		return err
+	}
 
 	payload, _ := json.Marshal(map[string]string{"id": id})
 	s.appendOutboxLocked(coresync.MutationTrash, id, payload)
@@ -522,6 +562,10 @@ func (s *Service) Restore(ctx context.Context, id string) (vault.Item, error) {
 		remoteItem, err := s.deps.Remote.Restore(ctx, id)
 		if err == nil {
 			s.mu.Lock()
+			if err := s.ensureUnlocked(); err != nil {
+				s.mu.Unlock()
+				return vault.Item{}, err
+			}
 			remoteItem.Deleted = false
 			remoteItem.SyncStatus = vault.SyncStatusSynced
 			for i, existing := range s.items {
@@ -539,6 +583,9 @@ func (s *Service) Restore(ctx context.Context, id string) (vault.Item, error) {
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := s.ensureUnlocked(); err != nil {
+		return vault.Item{}, err
+	}
 
 	payload, _ := json.Marshal(map[string]string{"id": id})
 	s.appendOutboxLocked(coresync.MutationRestore, id, payload)
@@ -571,6 +618,10 @@ func (s *Service) Delete(ctx context.Context, id string) error {
 		err := s.deps.Remote.Delete(ctx, id)
 		if err == nil {
 			s.mu.Lock()
+			if err := s.ensureUnlocked(); err != nil {
+				s.mu.Unlock()
+				return err
+			}
 			for i, existing := range s.items {
 				if existing.ID == id {
 					s.items = append(s.items[:i], s.items[i+1:]...)
@@ -586,6 +637,9 @@ func (s *Service) Delete(ctx context.Context, id string) error {
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := s.ensureUnlocked(); err != nil {
+		return err
+	}
 
 	payload, _ := json.Marshal(map[string]string{"id": id})
 	s.appendOutboxLocked(coresync.MutationDelete, id, payload)
@@ -693,37 +747,41 @@ func (s *Service) ResolveConflict(ctx context.Context, conflictID string, resolu
 		}
 
 	case coresync.ResolutionDuplicateLocal:
-		// Clone the conflicting item with a new local ID, queue a create mutation.
-		var original vault.Item
-		originalFound := false
-		for _, item := range s.items {
+		// Clone the conflicting local item into a new pending create. The original
+		// item is resolved to the remote version when available.
+		var localCopy vault.Item
+		originalIdx := -1
+		for i, item := range s.items {
 			if item.ID == conflict.ItemID {
-				original = item
-				originalFound = true
+				localCopy = item
+				originalIdx = i
 				break
 			}
 		}
-		if originalFound {
-			dup := original
-			dup.ID = fmt.Sprintf("local-%d", s.now().UnixNano())
-			dup.SyncStatus = vault.SyncStatusPending
-			dup.ConflictID = ""
-
-			// Append duplicate.
-			s.items = append(s.items, dup)
-
-			// Queue a create mutation for the duplicate.
-			payload, _ := json.Marshal(dup)
-			s.appendOutboxLocked(coresync.MutationCreate, dup.ID, payload)
-
-			// Clear conflict on original.
-			for i, item := range s.items {
-				if item.ID == conflict.ItemID {
-					s.items[i].ConflictID = ""
-					// Keep original's existing outbox mutations intact.
+		if originalIdx >= 0 {
+			remoteInstalled := false
+			for _, remoteItem := range s.pendingRemoteItems {
+				if remoteItem.ID == conflict.ItemID {
+					remoteItem.SyncStatus = vault.SyncStatusSynced
+					remoteItem.ConflictID = ""
+					s.items[originalIdx] = remoteItem
+					remoteInstalled = true
 					break
 				}
 			}
+			if !remoteInstalled {
+				s.items[originalIdx].SyncStatus = vault.SyncStatusSynced
+				s.items[originalIdx].ConflictID = ""
+			}
+
+			dup := localCopy
+			dup.ID = fmt.Sprintf("local-%d", s.now().UnixNano())
+			dup.SyncStatus = vault.SyncStatusPending
+			dup.ConflictID = ""
+			s.items = append(s.items, dup)
+
+			payload, _ := json.Marshal(dup)
+			s.appendOutboxLocked(coresync.MutationCreate, dup.ID, payload)
 		}
 	}
 
@@ -899,7 +957,7 @@ func (s *Service) syncOnce(ctx context.Context) {
 		s.items[i].SyncStatus = vault.SyncStatusSynced
 	}
 	if len(outboxSnapshot) > 0 {
-		s.outbox = nil
+		s.removeReplayedOutboxLocked(outboxSnapshot)
 	}
 	s.pendingRemoteItems = nil
 	s.pendingRemoteFolders = nil

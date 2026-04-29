@@ -748,6 +748,46 @@ func TestSyncReplaysOutboxBeforeClearing(t *testing.T) {
 	require.Equal(t, "CreatedRemotely", items[1].Name)
 }
 
+func TestSyncPreservesConcurrentOutboxMutations(t *testing.T) {
+	pendingItem := vault.Item{ID: "pending-1", Name: "PendingCreate", Type: vault.ItemTypeLogin}
+	payload, _ := json.Marshal(pendingItem)
+	concurrentItem := vault.Item{ID: "concurrent-1", Name: "Concurrent", Type: vault.ItemTypeLogin}
+	concurrentPayload, _ := json.Marshal(concurrentItem)
+
+	syncCallCount := 0
+	fr := &fakeRemote{revisionRev: "rev2"}
+	var svc *Service
+	fr.onCreate = func(ctx context.Context, item vault.Item) (vault.Item, error) {
+		// Simulate a user queuing another mutation while the sync worker is
+		// replaying its original outbox snapshot. That new mutation must not be
+		// cleared with the replayed snapshot.
+		svc.mu.Lock()
+		svc.outbox = append(svc.outbox, coresync.OutboxMutation{ID: "m2", Kind: coresync.MutationCreate, ItemID: "concurrent-1", Payload: concurrentPayload})
+		svc.mu.Unlock()
+		return vault.Item{ID: "remote-pending-1", Name: item.Name, RevisionDate: time.Now(), Type: item.Type}, nil
+	}
+	fr.onSync = func(ctx context.Context) ([]vault.Item, []vault.Folder, string, error) {
+		syncCallCount++
+		if syncCallCount == 1 {
+			return []vault.Item{{ID: "remote-1", Name: "Remote", RevisionDate: time.Now(), Type: vault.ItemTypeLogin}}, nil, "rev3", nil
+		}
+		return []vault.Item{{ID: "remote-1", Name: "Remote", RevisionDate: time.Now(), Type: vault.ItemTypeLogin}, {ID: "remote-pending-1", Name: "PendingCreate", RevisionDate: time.Now(), Type: vault.ItemTypeLogin}}, nil, "rev4", nil
+	}
+
+	svc = NewService(Deps{Remote: fr})
+	svc.mu.Lock()
+	svc.state = auth.LockStateUnlocked
+	svc.outbox = []coresync.OutboxMutation{{ID: "m1", Kind: coresync.MutationCreate, ItemID: "pending-1", Payload: payload}}
+	svc.rebuildIndexLocked()
+	svc.mu.Unlock()
+
+	svc.syncOnce(context.Background())
+
+	pending := svc.pendingMutationsForTest()
+	require.Len(t, pending, 1, "concurrent mutation should be preserved")
+	require.Equal(t, "m2", pending[0].ID)
+}
+
 func TestSyncKeepsOutboxWhenReplayFails(t *testing.T) {
 	localItem := vault.Item{
 		ID:   "item-1",
@@ -852,6 +892,8 @@ func TestResolveConflictDuplicateLocalQueuesCreate(t *testing.T) {
 
 	require.Equal(t, "item-1", original.ID)
 	require.Empty(t, original.ConflictID, "original should have conflict cleared")
+	require.Equal(t, vault.SyncStatusSynced, original.SyncStatus, "original should no longer be marked conflicted")
+	require.Equal(t, "RemoteVersion", original.Name, "original should resolve to remote version")
 	require.Contains(t, duplicate.ID, "local-", "duplicate should have local ID")
 	require.Equal(t, vault.SyncStatusPending, duplicate.SyncStatus, "duplicate should be pending")
 
