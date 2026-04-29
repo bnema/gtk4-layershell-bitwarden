@@ -18,7 +18,6 @@ func NewBox() Box {
 
 var (
 	ErrInvalidKey      = errors.New("secretbox: invalid key size")
-	ErrInvalidCipher   = errors.New("secretbox: invalid ciphertext")
 	ErrDecryptFailed   = errors.New("secretbox: decryption failed")
 	ErrCiphertextShort = errors.New("secretbox: ciphertext too short")
 )

@@ -34,7 +34,11 @@ func TestNewClientDefaultUSNoNetwork(t *testing.T) {
 	client, err := NewClient(cfg)
 	require.NoError(t, err)
 	require.NotNil(t, client)
-	// Verify the underlying SDK client is non-nil and locked.
+	// White-box: verify the underlying SDK client is non-nil and locked.
+	// We access client.sdk directly because IsLocked has no public
+	// equivalent on the adapter — the adapter's Lock() method delegates
+	// to the same SDK method and returns nil, but we cannot assert on
+	// error alone to prove the SDK state changed.
 	assert.True(t, client.sdk.IsLocked())
 }
 
@@ -65,10 +69,4 @@ func TestLockReturnsNil(t *testing.T) {
 	err = adapter.Lock(context.Background())
 	require.NoError(t, err)
 	assert.True(t, sdkClient.IsLocked())
-}
-
-func TestCompileTimeInterfaceCheck(t *testing.T) {
-	// This test verifies the compile-time assertion in client.go.
-	// If the package compiles, the check passes.
-	var _ = NewFromSDK
 }

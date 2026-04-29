@@ -69,6 +69,25 @@ func TestEditableFromItem_RoundTrip_SecureNote(t *testing.T) {
 	require.Equal(t, item.Notes, built.SecureNote.Text)
 }
 
+func TestEditableFromItem_RoundTrip_SecureNote_TextInSecureNote(t *testing.T) {
+	// Some secure notes store content in SecureNote.Text rather than the top-level Notes field.
+	item := vault.Item{
+		Name:       "My Note",
+		Type:       vault.ItemTypeSecureNote,
+		SecureNote: &vault.SecureNote{Text: "Secret body in SecureNote.Text"},
+	}
+	e := EditableFromItem(item)
+	require.Equal(t, "My Note", e.Name)
+	require.Equal(t, vault.ItemTypeSecureNote, e.Type)
+	require.Equal(t, "Secret body in SecureNote.Text", e.Notes, "should capture SecureNote.Text")
+
+	built := e.BuildItem()
+	require.Equal(t, item.Name, built.Name)
+	require.Equal(t, item.Type, built.Type)
+	require.NotNil(t, built.SecureNote)
+	require.Equal(t, "Secret body in SecureNote.Text", built.SecureNote.Text)
+}
+
 func TestEditableFromItem_RoundTrip_Card(t *testing.T) {
 	item := vault.Item{
 		Name: "My Card",

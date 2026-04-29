@@ -2,7 +2,7 @@ package app
 
 import (
 	"context"
-	"crypto/sha256"
+	"crypto/rand"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+	"golang.org/x/crypto/argon2"
 	"golang.org/x/crypto/chacha20poly1305"
 
 	"github.com/bnema/gtk4-layershell-bitwarden/internal/adapters/cache/crypto"
@@ -56,9 +57,12 @@ func TestIntegrationOfflineUnlockFromEncryptedCache(t *testing.T) {
 	require.NoError(t, err)
 
 	password := "mypassword"
-	key := sha256.Sum256([]byte(password))
+	salt := make([]byte, 16)
+	_, err = rand.Read(salt)
+	require.NoError(t, err)
+	key := argon2.IDKey([]byte(password), salt, 3, 64*1024, 4, 32)
 	box := crypto.NewBox()
-	ciphertext, err := box.Seal(plainJSON, key[:])
+	ciphertext, err := box.Seal(plainJSON, key)
 	require.NoError(t, err)
 
 	snap := cache.Snapshot{
@@ -66,6 +70,7 @@ func TestIntegrationOfflineUnlockFromEncryptedCache(t *testing.T) {
 		AccountHash:     "test-account-hash",
 		LastRevision:    "rev-1",
 		SavedAt:         time.Now(),
+		CacheKeySalt:    salt,
 		VaultCiphertext: ciphertext,
 	}
 
@@ -126,19 +131,13 @@ func TestIntegrationOfflineEditQueuesEncryptedOutbox(t *testing.T) {
 		Outbox: outboxStore,
 	})
 
-	// Unlock first (no cache needed, just set state).
-	svc.mu.Lock()
-	svc.state = auth.LockStateUnlocked
-	svc.cacheKey = make([]byte, chacha20poly1305.KeySize)
-	for i := range svc.cacheKey {
-		svc.cacheKey[i] = byte(i)
+	key := make([]byte, chacha20poly1305.KeySize)
+	for i := range key {
+		key[i] = byte(i)
 	}
-	// Add a base item to update.
-	svc.items = []vault.Item{
+	svc.installUnlockedStateForTest(key, []vault.Item{
 		{ID: "item-1", Name: "Original", Type: vault.ItemTypeLogin},
-	}
-	svc.rebuildIndexLocked()
-	svc.mu.Unlock()
+	})
 
 	// Update offline — this should queue a mutation and persist to outbox.
 	updated, err := svc.Update(context.Background(), "item-1", vault.Item{
@@ -184,7 +183,7 @@ func TestIntegrationOfflineEditQueuesEncryptedOutbox(t *testing.T) {
 // Test 3: Remote revision unchanged skips full sync
 // ---------------------------------------------------------------------------
 
-func TestIntegrationRemoteRevisionUnchangedSkipsFullSync(t *testing.T) {
+func TestIntegrationRemoteRevisionEmptySkipsFullSync(t *testing.T) {
 	fr := &fakeRemote{
 		revisionRev: "",
 	}
@@ -376,6 +375,7 @@ func TestIntegrationRelockCancelsStaleWorker(t *testing.T) {
 	fr := &fakeRemote{
 		revisionRev: "rev-2",
 		syncBlockCh: make(chan struct{}),
+		syncEnterCh: make(chan struct{}, 1),
 		syncItems:   []vault.Item{{ID: "remote-1", Name: "StaleItem", Type: vault.ItemTypeLogin}},
 		syncFolders: nil,
 		syncRev:     "rev-3",
@@ -398,9 +398,7 @@ func TestIntegrationRelockCancelsStaleWorker(t *testing.T) {
 	require.NoError(t, err)
 
 	// Wait for sync worker to reach Sync (blocked on syncBlockCh).
-	require.Eventually(t, func() bool {
-		return fr.syncStarted.Load()
-	}, 1*time.Second, 10*time.Millisecond, "sync worker should have started")
+	<-fr.syncEnterCh
 
 	// Lock while sync worker is blocked.
 	err = svc.Lock(context.Background())
@@ -409,8 +407,12 @@ func TestIntegrationRelockCancelsStaleWorker(t *testing.T) {
 	// Unblock the sync worker AFTER Lock.
 	close(fr.syncBlockCh)
 
-	// Give the worker time to potentially install stale state.
-	time.Sleep(200 * time.Millisecond)
+	// Wait for context cancellation to propagate.
+	require.Eventually(t, func() bool {
+		svc.mu.Lock()
+		defer svc.mu.Unlock()
+		return svc.state == auth.LockStateLocked && svc.items == nil
+	}, 1*time.Second, 10*time.Millisecond, "service should be locked with no items")
 
 	// Verify service is locked.
 	_, err = svc.Search(context.Background(), "StaleItem", 10)

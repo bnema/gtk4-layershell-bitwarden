@@ -87,16 +87,6 @@ func TestBuildCSS_IncludesStatusColorVariables(t *testing.T) {
 	}
 }
 
-func TestBuildCSS_IncludesStatusSelectors(t *testing.T) {
-	css := BuildCSS(coretheme.DefaultDarkPalette(), 1.0)
-
-	if !strings.Contains(css, "glsbw-status") {
-		t.Errorf("expected .glsbw-status selector")
-	}
-	if !strings.Contains(css, "glsbw-conflict") {
-		t.Errorf("expected .glsbw-conflict selector")
-	}
-	if !strings.Contains(css, "glsbw-error") {
-		t.Errorf("expected .glsbw-error selector")
-	}
-}
+// TestBuildCSS_IncludesStatusSelectors is intentionally removed as a duplicate.
+// The status selectors (.glsbw-status, .glsbw-conflict, .glsbw-error) are
+// already covered by TestBuildCSS_DefaultDarkPalette_Scale1_2.

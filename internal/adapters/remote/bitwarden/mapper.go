@@ -60,7 +60,10 @@ func toCoreItem(item sdk.Item) (corevault.Item, error) {
 
 	case sdk.ItemTypeSecureNote:
 		ci.Type = corevault.ItemTypeSecureNote
-		ci.SecureNote = &corevault.SecureNote{}
+		// Notes holds the secure note body; mirror into SecureNote.Text for
+		// SDK round-trip fidelity per the canonical semantics documented on
+		// corevault.SecureNote.
+		ci.SecureNote = &corevault.SecureNote{Text: item.Notes}
 
 	case sdk.ItemTypeCard:
 		ci.Type = corevault.ItemTypeCard
@@ -102,6 +105,8 @@ func toCoreItem(item sdk.Item) (corevault.Item, error) {
 	}
 
 	// Map fields: SDK Type int → core Type string (decimal).
+	// SDK field types: 0 = text, 1 = hidden (boolean), 2 = linked.
+	// Map Hidden: SDK Type == 1 → Hidden = true.
 	if len(item.Fields) > 0 {
 		ci.Fields = make([]corevault.Field, len(item.Fields))
 		for i, f := range item.Fields {
@@ -109,7 +114,7 @@ func toCoreItem(item sdk.Item) (corevault.Item, error) {
 				Name:   f.Name,
 				Value:  f.Value,
 				Type:   fmt.Sprintf("%d", f.Type),
-				Hidden: false,
+				Hidden: f.Type == 1,
 			}
 		}
 	}
@@ -202,6 +207,10 @@ func toSDKItem(item corevault.Item) sdk.Item {
 	}
 
 	// Map fields: core Type string (decimal) → SDK Type int.
+	// strconv.Atoi returns 0 on error (empty string, non-numeric), which is
+	// the safe default (SDK field type 0 = text). Callers must validate the
+	// Type string before round-tripping; an invalid parse silently defaults
+	// to text, which preserves data without breaking the sync.
 	if len(item.Fields) > 0 {
 		si.Fields = make([]sdk.Field, len(item.Fields))
 		for i, f := range item.Fields {
@@ -227,17 +236,22 @@ func toCoreFolder(folder sdk.Folder) corevault.Folder {
 }
 
 // toCoreAttachment maps an SDK Attachment to a core vault Attachment.
-// SDK Size is int64; core Size is string — formatted as decimal string.
 func toCoreAttachment(att sdk.Attachment) corevault.Attachment {
 	return corevault.Attachment{
 		ID:       att.ID,
 		FileName: att.FileName,
-		Size:     fmt.Sprintf("%d", att.Size),
+		Size:     att.Size,
 		URL:      att.URL,
 	}
 }
 
 // toSDKRegion maps a core config Region to an SDK Region.
+//
+// Self-hosted and unknown region values default to US because NewClient
+// applies the server URL override (cfg.Bitwarden.ServerURL) for
+// self-hosted deployments, making the SDK region token irrelevant. The SDK
+// uses the region only to derive the default API base URL, which is
+// replaced when a ServerURL is set.
 func toSDKRegion(region coreconfig.Region) sdk.Region {
 	switch region {
 	case coreconfig.RegionUS:

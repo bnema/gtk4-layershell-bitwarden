@@ -44,6 +44,7 @@ func TestRedactsSensitiveKeys(t *testing.T) {
 		{"auth", "basic-auth"},
 		{"ciphertext", "encrypted-data"},
 		{"access_token", "tok-xyz"},
+		{"master_password", "p4ss"},
 	}
 
 	for _, tt := range tests {
@@ -57,6 +58,31 @@ func TestRedactsSensitiveKeys(t *testing.T) {
 			output := buf.String()
 			require.Contains(t, output, "[REDACTED]", "value should be redacted for key %q", tt.key)
 			require.NotContains(t, output, tt.value, "raw value should not appear for key %q", tt.key)
+		})
+	}
+}
+
+func TestDoesNotOverRedactNonSensitiveKeys(t *testing.T) {
+	tests := []struct {
+		key   string
+		value string
+	}{
+		{"monkey", "bonobo"},        // contains "key" but not as a word
+		{"donkey", "mule"},          // contains "key" but not as a word
+		{"auth0_domain", "example"}, // contains "auth" but not as a word
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.key, func(t *testing.T) {
+			var buf bytes.Buffer
+			logger := capture(&buf)
+			adapter := New(logger)
+
+			adapter.Info("test", tt.key, tt.value)
+
+			output := buf.String()
+			require.Contains(t, output, tt.value, "value should NOT be redacted for key %q", tt.key)
+			require.NotContains(t, output, "[REDACTED]", "should not contain [REDACTED] for key %q", tt.key)
 		})
 	}
 }

@@ -29,7 +29,7 @@ func DefaultDarkPalette() Palette {
 		StatusPending:  "#ffa000",
 		StatusWarning:  "#ff8c00",
 		StatusConflict: "#d32f2f",
-		StatusDanger:   "#d32f2f",
+		StatusDanger:   "#b71c1c",
 	}
 }
 

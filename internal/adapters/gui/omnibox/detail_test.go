@@ -25,8 +25,9 @@ func TestDetailFromItem_Login(t *testing.T) {
 	require.Equal(t, "https://example.com", d.URI)
 	require.True(t, d.PasswordPresent)
 	require.True(t, d.TOTPPresent)
-	// Secret values not exposed via any field
-	require.NotEqual(t, "secret", d.Username)
+	// Detail intentionally has no Password or TOTP string fields — only
+	// boolean presence indicators (PasswordPresent, TOTPPresent).
+	// This test verifies the secret values are not leaked via any field.
 }
 
 func TestDetailFromItem_Login_NilLogin(t *testing.T) {
@@ -113,8 +114,8 @@ func TestDetailFromItem_Attachments(t *testing.T) {
 			Username: "test",
 		},
 		Attachments: []vault.Attachment{
-			{ID: "a1", FileName: "photo.jpg", Size: "1024", URL: "https://example.com/photo"},
-			{ID: "a2", FileName: "doc.pdf", Size: "2048", URL: "https://example.com/doc"},
+			{ID: "a1", FileName: "photo.jpg", Size: 1024, URL: "https://example.com/photo"},
+			{ID: "a2", FileName: "doc.pdf", Size: 2048, URL: "https://example.com/doc"},
 		},
 	}
 

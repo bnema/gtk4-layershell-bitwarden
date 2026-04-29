@@ -156,7 +156,7 @@ func ValidateAll(cfg *Config) []error {
 		}
 	}
 
-	if cfg.Appearance.UIScale < 0.5 || cfg.Appearance.UIScale > 3.0 {
+	if cfg.Appearance.UIScale != 0 && (cfg.Appearance.UIScale < 0.5 || cfg.Appearance.UIScale > 3.0) {
 		errs = append(errs, ErrInvalidUIScale)
 	}
 

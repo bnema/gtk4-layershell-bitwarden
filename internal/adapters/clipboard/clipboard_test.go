@@ -89,7 +89,9 @@ func TestClearCancelsTimerAndClears(t *testing.T) {
 	require.NoError(t, err)
 
 	// Timer should have been cancelled and clear called.
+	mu.Lock()
 	require.Equal(t, 1, clearCount, "clear should be called once")
+	mu.Unlock()
 
 	// Wait a bit to ensure the timer doesn't fire again.
 	time.Sleep(100 * time.Millisecond)
@@ -116,6 +118,16 @@ func TestContextCancelledBeforeSet(t *testing.T) {
 	cancel()
 
 	err := a.Set(ctx, "should-not-set", 0)
+	require.Error(t, err)
+	require.ErrorIs(t, err, context.Canceled)
+}
+
+func TestContextCancelledBeforeClear(t *testing.T) {
+	a := New(nil, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := a.Clear(ctx)
 	require.Error(t, err)
 	require.ErrorIs(t, err, context.Canceled)
 }

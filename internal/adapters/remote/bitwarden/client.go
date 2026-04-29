@@ -14,6 +14,20 @@ import (
 // Compile-time check that Client satisfies out.RemoteVault.
 var _ out.RemoteVault = (*Client)(nil)
 
+// Package sentinel errors for operations the SDK does not support.
+var (
+	// ErrTwoFactorUnsupported is returned by CompleteTwoFactor because the
+	// current RemoteVault port does not expose a two-factor challenge handle;
+	// callers should use BeginLogin/CompleteLogin on the SDK directly.
+	ErrTwoFactorUnsupported = errors.New("bitwarden: two-factor challenge not exposed by port, use BeginLogin/CompleteLogin directly")
+
+	// ErrAttachmentsNotSupported is returned by ListAttachments because the
+	// public SDK Item type does not expose an Attachments field. The SDK can
+	// download/upload/delete attachments but cannot enumerate them at the item
+	// level through the public API surface.
+	ErrAttachmentsNotSupported = errors.New("bitwarden: attachment enumeration not supported by SDK—use DownloadAttachment with known IDs")
+)
+
 // Client wraps the Bitwarden Go SDK to implement the out.RemoteVault port.
 type Client struct {
 	sdk *sdk.Client
@@ -53,10 +67,11 @@ func (c *Client) Login(ctx context.Context, email, password string) error {
 	return c.sdk.Login(ctx, sdk.LoginOptions{Email: email, Password: password})
 }
 
-// CompleteTwoFactor returns an unsupported error because the current
-// RemoteVault port does not expose a two-factor challenge handle.
+// CompleteTwoFactor returns ErrTwoFactorUnsupported because the current
+// RemoteVault port does not expose a two-factor challenge handle; callers
+// should use BeginLogin/CompleteLogin on the SDK directly.
 func (c *Client) CompleteTwoFactor(_ context.Context, _, _ string, _ bool) error {
-	return errors.New("unsupported: two-factor challenge not exposed by port, use BeginLogin/CompleteLogin directly")
+	return ErrTwoFactorUnsupported
 }
 
 // Lock locks the vault client, clearing in-memory key material.
@@ -65,8 +80,14 @@ func (c *Client) Lock(_ context.Context) error {
 	return nil
 }
 
-// Revision returns an opaque revision string. SDK v0.1.0 has no public
-// revision-date endpoint, so the adapter returns "unknown" to force a sync.
+// Revision returns an opaque revision string.
+//
+// The SDK (v0.1.0) has no public revision-date or revision-check endpoint.
+// Because we cannot obtain a stable token to compare against, every call
+// forces a full sync. Returning "unknown" (a non-empty sentinel that never
+// matches any real token) ensures the caller always detects a change and
+// triggers Sync. Do NOT fake a stable token here — that would suppress syncs
+// and cause stale state.
 func (c *Client) Revision(_ context.Context) (string, error) {
 	return "unknown", nil
 }
@@ -142,10 +163,12 @@ func (c *Client) Delete(ctx context.Context, id string) error {
 	return c.sdk.Vault().Delete(ctx, sdk.ItemID(id))
 }
 
-// ListAttachments returns attachments for a vault item. The public SDK Item
-// type does not expose an Attachments field, so this returns an empty slice.
+// ListAttachments returns ErrAttachmentsNotSupported because the public SDK
+// Item type does not expose an Attachments field. The SDK can
+// download/upload/delete individual attachments by known ID but cannot
+// enumerate them at the item level through the public API surface.
 func (c *Client) ListAttachments(_ context.Context, _ string) ([]corevault.Attachment, error) {
-	return nil, nil
+	return nil, ErrAttachmentsNotSupported
 }
 
 // DownloadAttachment downloads and decrypts an attachment to dst.

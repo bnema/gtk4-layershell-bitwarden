@@ -5,38 +5,41 @@ import (
 	"time"
 )
 
-func TestPolicyDefaults(t *testing.T) {
-	p := Policy{
-		ClearAfter:     45 * time.Second,
-		CloseAfterCopy: true,
+func TestPolicy(t *testing.T) {
+	tests := []struct {
+		name          string
+		policy        Policy
+		wantClear     time.Duration
+		wantCloseCopy bool
+	}{
+		{
+			name:          "defaults",
+			policy:        Policy{ClearAfter: 45 * time.Second, CloseAfterCopy: true},
+			wantClear:     45 * time.Second,
+			wantCloseCopy: true,
+		},
+		{
+			name:          "zero value",
+			policy:        Policy{},
+			wantClear:     0,
+			wantCloseCopy: false,
+		},
+		{
+			name:          "custom",
+			policy:        Policy{ClearAfter: 30 * time.Second, CloseAfterCopy: false},
+			wantClear:     30 * time.Second,
+			wantCloseCopy: false,
+		},
 	}
-	if p.ClearAfter != 45*time.Second {
-		t.Errorf("expected ClearAfter 45s, got %v", p.ClearAfter)
-	}
-	if !p.CloseAfterCopy {
-		t.Error("expected CloseAfterCopy true")
-	}
-}
 
-func TestPolicyZeroValue(t *testing.T) {
-	var p Policy
-	if p.ClearAfter != 0 {
-		t.Errorf("expected zero ClearAfter, got %v", p.ClearAfter)
-	}
-	if p.CloseAfterCopy {
-		t.Error("expected zero CloseAfterCopy false")
-	}
-}
-
-func TestPolicyCustom(t *testing.T) {
-	p := Policy{
-		ClearAfter:     30 * time.Second,
-		CloseAfterCopy: false,
-	}
-	if p.ClearAfter != 30*time.Second {
-		t.Errorf("expected ClearAfter 30s, got %v", p.ClearAfter)
-	}
-	if p.CloseAfterCopy {
-		t.Error("expected CloseAfterCopy false")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.policy.ClearAfter != tt.wantClear {
+				t.Errorf("ClearAfter = %v, want %v", tt.policy.ClearAfter, tt.wantClear)
+			}
+			if tt.policy.CloseAfterCopy != tt.wantCloseCopy {
+				t.Errorf("CloseAfterCopy = %v, want %v", tt.policy.CloseAfterCopy, tt.wantCloseCopy)
+			}
+		})
 	}
 }

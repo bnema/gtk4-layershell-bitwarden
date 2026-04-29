@@ -72,10 +72,17 @@ func (a *Adapter) Set(ctx context.Context, text string, ttl time.Duration) error
 	return nil
 }
 
-// Clear cancels any pending timer and clears the clipboard.
+// Clear cancels any pending timer and clears the clipboard. It respects context
+// cancellation: if ctx is already done the operation is skipped.
 func (a *Adapter) Clear(ctx context.Context) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+	}
 
 	if a.timer != nil {
 		a.timer.Stop()

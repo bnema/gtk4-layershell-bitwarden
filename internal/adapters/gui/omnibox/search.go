@@ -1,9 +1,9 @@
 package omnibox
 
 import (
-	"net/url"
 	"strings"
 
+	"github.com/bnema/gtk4-layershell-bitwarden/internal/adapters/gui/display"
 	"github.com/bnema/gtk4-layershell-bitwarden/internal/core/config"
 	"github.com/bnema/gtk4-layershell-bitwarden/internal/core/vault"
 )
@@ -45,7 +45,8 @@ func PrimaryActionFor(row Row, cfg *config.Config) Action {
 		case config.ActionCopyPassword:
 			return ActionCopyPassword
 		case config.ActionOpenURL:
-			return ActionCopyPassword // open_url not wired yet; fallback safe
+			// TODO: open_url is not yet implemented. Return safe fallback.
+			return ActionCopyPassword
 		}
 	}
 	return ActionCopyPassword
@@ -87,77 +88,5 @@ func rowFromItem(item vault.Item) Row {
 
 // buildRowSubtitle builds a safe one-line subtitle for a vault item row.
 func buildRowSubtitle(item vault.Item) string {
-	switch item.Type {
-	case vault.ItemTypeLogin:
-		if item.Login == nil {
-			return ""
-		}
-		parts := make([]string, 0, 2)
-		if item.Login.Username != "" {
-			parts = append(parts, item.Login.Username)
-		}
-		if len(item.Login.URIs) > 0 {
-			parts = append(parts, safeURI(item.Login.URIs[0].URI))
-		}
-		return strings.Join(parts, " — ")
-
-	case vault.ItemTypeSecureNote:
-		return "Secure note"
-
-	case vault.ItemTypeCard:
-		if item.Card == nil {
-			return ""
-		}
-		parts := make([]string, 0, 2)
-		if item.Card.Brand != "" {
-			parts = append(parts, item.Card.Brand)
-		}
-		if last4 := safeLast4(item.Card.Number); last4 != "" {
-			parts = append(parts, "•••• "+last4)
-		}
-		return strings.Join(parts, " ")
-
-	case vault.ItemTypeIdentity:
-		if item.Identity == nil {
-			return ""
-		}
-		parts := make([]string, 0, 4)
-		if item.Identity.FirstName != "" {
-			parts = append(parts, item.Identity.FirstName)
-		}
-		if item.Identity.LastName != "" {
-			parts = append(parts, item.Identity.LastName)
-		}
-		if item.Identity.Email != "" {
-			parts = append(parts, item.Identity.Email)
-		}
-		if item.Identity.Username != "" {
-			parts = append(parts, item.Identity.Username)
-		}
-		return strings.Join(parts, " — ")
-
-	default:
-		return ""
-	}
-}
-
-// safeURI attempts to extract just the host from a URI string.
-func safeURI(raw string) string {
-	u, err := url.Parse(raw)
-	if err != nil || u.Host == "" {
-		if idx := strings.IndexAny(raw, "?#"); idx >= 0 {
-			return raw[:idx]
-		}
-		return raw
-	}
-	return u.Host
-}
-
-// safeLast4 returns the last 4 characters of a card number if it is at least
-// 4 characters long.
-func safeLast4(number string) string {
-	if len(number) < 4 {
-		return ""
-	}
-	return number[len(number)-4:]
+	return display.BuildRowSubtitle(item)
 }

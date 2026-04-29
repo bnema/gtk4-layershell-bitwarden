@@ -367,6 +367,13 @@ func (v *View) doUnlock(ctx context.Context) {
 			return
 		}
 
+		// Check context cancellation before scheduling UI updates.
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+
 		idleAddOnce(func() {
 			v.passwordEntry.SetText("")
 
@@ -434,6 +441,12 @@ func (v *View) doSearch(query string) {
 		defer v.searchLock.Unlock()
 		results, err := v.service.Search(context.Background(), query, 50)
 		if err != nil {
+			idleAddOnce(func() {
+				v.mu.Lock()
+				v.state.SetStatus(Status{Text: "Search failed", Error: err.Error()})
+				v.mu.Unlock()
+				v.renderStatus()
+			})
 			return
 		}
 		rows := RowsFromScored(results)
@@ -812,7 +825,7 @@ func (v *View) renderForm(item vault.Item) {
 	nameEntry.SetText(editable.Name)
 	formContent.Append(&nameEntry.Widget)
 
-	// Declare all type-specific entry pointers.
+	// Type-specific fields rendered by helper methods.
 	var usernameEntry, uriEntry, pwEntry, totpEntry *gtklib.Entry
 	var chEntry, brandEntry, numEntry, expMEntry, expYEntry, codeEntry *gtklib.Entry
 	var fnEntry, lnEntry, emailEntry, phoneEntry, idUserEntry *gtklib.Entry
@@ -820,143 +833,13 @@ func (v *View) renderForm(item vault.Item) {
 
 	switch item.Type {
 	case vault.ItemTypeLogin:
-		uText := "Username"
-		usernameLabel := gtklib.NewLabel(&uText)
-		formContent.Append(&usernameLabel.Widget)
-		usernameEntry = gtklib.NewEntry()
-		usernameEntry.SetText(editable.Username)
-		formContent.Append(&usernameEntry.Widget)
-
-		uriText := "URI"
-		uriLabel := gtklib.NewLabel(&uriText)
-		formContent.Append(&uriLabel.Widget)
-		uriEntry = gtklib.NewEntry()
-		uriEntry.SetText(editable.URI)
-		formContent.Append(&uriEntry.Widget)
-
-		pwText := "Password"
-		pwLabel := gtklib.NewLabel(&pwText)
-		formContent.Append(&pwLabel.Widget)
-		pwEntry = gtklib.NewEntry()
-		pwEntry.SetText(editable.Password)
-		pwEntry.SetVisibility(false)
-		formContent.Append(&pwEntry.Widget)
-
-		totpText := "TOTP"
-		totpLabel := gtklib.NewLabel(&totpText)
-		formContent.Append(&totpLabel.Widget)
-		totpEntry = gtklib.NewEntry()
-		totpEntry.SetText(editable.TOTP)
-		totpEntry.SetVisibility(false)
-		formContent.Append(&totpEntry.Widget)
-
+		usernameEntry, uriEntry, pwEntry, totpEntry = v.renderLoginFormFields(formContent, editable)
 	case vault.ItemTypeSecureNote:
 		// No additional fields beyond Name and Notes.
-
 	case vault.ItemTypeCard:
-		chText := "Cardholder name"
-		chLabel := gtklib.NewLabel(&chText)
-		formContent.Append(&chLabel.Widget)
-		chEntry = gtklib.NewEntry()
-		chEntry.SetText(editable.CardholderName)
-		formContent.Append(&chEntry.Widget)
-
-		brandText := "Brand"
-		brandLabel := gtklib.NewLabel(&brandText)
-		formContent.Append(&brandLabel.Widget)
-		brandEntry = gtklib.NewEntry()
-		brandEntry.SetText(editable.CardBrand)
-		formContent.Append(&brandEntry.Widget)
-
-		numText := "Number"
-		numLabel := gtklib.NewLabel(&numText)
-		formContent.Append(&numLabel.Widget)
-		numEntry = gtklib.NewEntry()
-		numEntry.SetText(editable.CardNumber)
-		numEntry.SetVisibility(false)
-		formContent.Append(&numEntry.Widget)
-
-		expMText := "Exp month"
-		expMLabel := gtklib.NewLabel(&expMText)
-		formContent.Append(&expMLabel.Widget)
-		expMEntry = gtklib.NewEntry()
-		expMEntry.SetText(editable.CardExpMonth)
-		formContent.Append(&expMEntry.Widget)
-
-		expYText := "Exp year"
-		expYLabel := gtklib.NewLabel(&expYText)
-		formContent.Append(&expYLabel.Widget)
-		expYEntry = gtklib.NewEntry()
-		expYEntry.SetText(editable.CardExpYear)
-		formContent.Append(&expYEntry.Widget)
-
-		codeText := "Code"
-		codeLabel := gtklib.NewLabel(&codeText)
-		formContent.Append(&codeLabel.Widget)
-		codeEntry = gtklib.NewEntry()
-		codeEntry.SetText(editable.CardCode)
-		codeEntry.SetVisibility(false)
-		formContent.Append(&codeEntry.Widget)
-
+		chEntry, brandEntry, numEntry, expMEntry, expYEntry, codeEntry = v.renderCardFormFields(formContent, editable)
 	case vault.ItemTypeIdentity:
-		fnText := "First name"
-		fnLabel := gtklib.NewLabel(&fnText)
-		formContent.Append(&fnLabel.Widget)
-		fnEntry = gtklib.NewEntry()
-		fnEntry.SetText(editable.IdentityFirstName)
-		formContent.Append(&fnEntry.Widget)
-
-		lnText := "Last name"
-		lnLabel := gtklib.NewLabel(&lnText)
-		formContent.Append(&lnLabel.Widget)
-		lnEntry = gtklib.NewEntry()
-		lnEntry.SetText(editable.IdentityLastName)
-		formContent.Append(&lnEntry.Widget)
-
-		emailText := "Email"
-		emailLabel := gtklib.NewLabel(&emailText)
-		formContent.Append(&emailLabel.Widget)
-		emailEntry = gtklib.NewEntry()
-		emailEntry.SetText(editable.IdentityEmail)
-		formContent.Append(&emailEntry.Widget)
-
-		phoneText := "Phone"
-		phoneLabel := gtklib.NewLabel(&phoneText)
-		formContent.Append(&phoneLabel.Widget)
-		phoneEntry = gtklib.NewEntry()
-		phoneEntry.SetText(editable.IdentityPhone)
-		formContent.Append(&phoneEntry.Widget)
-
-		idUserText := "Username"
-		idUserLabel := gtklib.NewLabel(&idUserText)
-		formContent.Append(&idUserLabel.Widget)
-		idUserEntry = gtklib.NewEntry()
-		idUserEntry.SetText(editable.IdentityUsername)
-		formContent.Append(&idUserEntry.Widget)
-
-		ssnText := "SSN"
-		ssnLabel := gtklib.NewLabel(&ssnText)
-		formContent.Append(&ssnLabel.Widget)
-		ssnEntry = gtklib.NewEntry()
-		ssnEntry.SetText(editable.IdentitySSN)
-		ssnEntry.SetVisibility(false)
-		formContent.Append(&ssnEntry.Widget)
-
-		passportText := "Passport number"
-		passportLabel := gtklib.NewLabel(&passportText)
-		formContent.Append(&passportLabel.Widget)
-		passportEntry = gtklib.NewEntry()
-		passportEntry.SetText(editable.IdentityPassportNumber)
-		passportEntry.SetVisibility(false)
-		formContent.Append(&passportEntry.Widget)
-
-		licenseText := "License number"
-		licenseLabel := gtklib.NewLabel(&licenseText)
-		formContent.Append(&licenseLabel.Widget)
-		licenseEntry = gtklib.NewEntry()
-		licenseEntry.SetText(editable.IdentityLicenseNumber)
-		licenseEntry.SetVisibility(false)
-		formContent.Append(&licenseEntry.Widget)
+		fnEntry, lnEntry, emailEntry, phoneEntry, idUserEntry, ssnEntry, passportEntry, licenseEntry = v.renderIdentityFormFields(formContent, editable)
 	}
 
 	// Notes entry (for all types)
@@ -1047,6 +930,155 @@ func (v *View) renderForm(item vault.Item) {
 	handler1 := saveBtn.ConnectClicked(&saveCb)
 	v.retainDynamic(&saveBtn.Object, handler1, saveCb)
 	formContent.Append(&saveBtn.Widget)
+}
+
+// renderLoginFormFields renders login-specific fields (Username, URI, Password, TOTP)
+// into formContent and returns the created entry pointers.
+func (v *View) renderLoginFormFields(formContent *gtklib.Box, editable EditableItem) (usernameEntry, uriEntry, pwEntry, totpEntry *gtklib.Entry) {
+	uText := "Username"
+	usernameLabel := gtklib.NewLabel(&uText)
+	formContent.Append(&usernameLabel.Widget)
+	usernameEntry = gtklib.NewEntry()
+	usernameEntry.SetText(editable.Username)
+	formContent.Append(&usernameEntry.Widget)
+
+	uriText := "URI"
+	uriLabel := gtklib.NewLabel(&uriText)
+	formContent.Append(&uriLabel.Widget)
+	uriEntry = gtklib.NewEntry()
+	uriEntry.SetText(editable.URI)
+	formContent.Append(&uriEntry.Widget)
+
+	pwText := "Password"
+	pwLabel := gtklib.NewLabel(&pwText)
+	formContent.Append(&pwLabel.Widget)
+	pwEntry = gtklib.NewEntry()
+	pwEntry.SetText(editable.Password)
+	pwEntry.SetVisibility(false)
+	formContent.Append(&pwEntry.Widget)
+
+	totpText := "TOTP"
+	totpLabel := gtklib.NewLabel(&totpText)
+	formContent.Append(&totpLabel.Widget)
+	totpEntry = gtklib.NewEntry()
+	totpEntry.SetText(editable.TOTP)
+	totpEntry.SetVisibility(false)
+	formContent.Append(&totpEntry.Widget)
+	return
+}
+
+// renderCardFormFields renders card-specific fields (CardholderName, Brand, Number,
+// ExpMonth, ExpYear, Code) into formContent and returns the created entry pointers.
+func (v *View) renderCardFormFields(formContent *gtklib.Box, editable EditableItem) (chEntry, brandEntry, numEntry, expMEntry, expYEntry, codeEntry *gtklib.Entry) {
+	chText := "Cardholder name"
+	chLabel := gtklib.NewLabel(&chText)
+	formContent.Append(&chLabel.Widget)
+	chEntry = gtklib.NewEntry()
+	chEntry.SetText(editable.CardholderName)
+	formContent.Append(&chEntry.Widget)
+
+	brandText := "Brand"
+	brandLabel := gtklib.NewLabel(&brandText)
+	formContent.Append(&brandLabel.Widget)
+	brandEntry = gtklib.NewEntry()
+	brandEntry.SetText(editable.CardBrand)
+	formContent.Append(&brandEntry.Widget)
+
+	numText := "Number"
+	numLabel := gtklib.NewLabel(&numText)
+	formContent.Append(&numLabel.Widget)
+	numEntry = gtklib.NewEntry()
+	numEntry.SetText(editable.CardNumber)
+	numEntry.SetVisibility(false)
+	formContent.Append(&numEntry.Widget)
+
+	expMText := "Exp month"
+	expMLabel := gtklib.NewLabel(&expMText)
+	formContent.Append(&expMLabel.Widget)
+	expMEntry = gtklib.NewEntry()
+	expMEntry.SetText(editable.CardExpMonth)
+	formContent.Append(&expMEntry.Widget)
+
+	expYText := "Exp year"
+	expYLabel := gtklib.NewLabel(&expYText)
+	formContent.Append(&expYLabel.Widget)
+	expYEntry = gtklib.NewEntry()
+	expYEntry.SetText(editable.CardExpYear)
+	formContent.Append(&expYEntry.Widget)
+
+	codeText := "Code"
+	codeLabel := gtklib.NewLabel(&codeText)
+	formContent.Append(&codeLabel.Widget)
+	codeEntry = gtklib.NewEntry()
+	codeEntry.SetText(editable.CardCode)
+	codeEntry.SetVisibility(false)
+	formContent.Append(&codeEntry.Widget)
+	return
+}
+
+// renderIdentityFormFields renders identity-specific fields (FirstName, LastName, Email,
+// Phone, Username, SSN, PassportNumber, LicenseNumber) into formContent and returns
+// the created entry pointers.
+func (v *View) renderIdentityFormFields(formContent *gtklib.Box, editable EditableItem) (fnEntry, lnEntry, emailEntry, phoneEntry, idUserEntry, ssnEntry, passportEntry, licenseEntry *gtklib.Entry) {
+	fnText := "First name"
+	fnLabel := gtklib.NewLabel(&fnText)
+	formContent.Append(&fnLabel.Widget)
+	fnEntry = gtklib.NewEntry()
+	fnEntry.SetText(editable.IdentityFirstName)
+	formContent.Append(&fnEntry.Widget)
+
+	lnText := "Last name"
+	lnLabel := gtklib.NewLabel(&lnText)
+	formContent.Append(&lnLabel.Widget)
+	lnEntry = gtklib.NewEntry()
+	lnEntry.SetText(editable.IdentityLastName)
+	formContent.Append(&lnEntry.Widget)
+
+	emailText := "Email"
+	emailLabel := gtklib.NewLabel(&emailText)
+	formContent.Append(&emailLabel.Widget)
+	emailEntry = gtklib.NewEntry()
+	emailEntry.SetText(editable.IdentityEmail)
+	formContent.Append(&emailEntry.Widget)
+
+	phoneText := "Phone"
+	phoneLabel := gtklib.NewLabel(&phoneText)
+	formContent.Append(&phoneLabel.Widget)
+	phoneEntry = gtklib.NewEntry()
+	phoneEntry.SetText(editable.IdentityPhone)
+	formContent.Append(&phoneEntry.Widget)
+
+	idUserText := "Username"
+	idUserLabel := gtklib.NewLabel(&idUserText)
+	formContent.Append(&idUserLabel.Widget)
+	idUserEntry = gtklib.NewEntry()
+	idUserEntry.SetText(editable.IdentityUsername)
+	formContent.Append(&idUserEntry.Widget)
+
+	ssnText := "SSN"
+	ssnLabel := gtklib.NewLabel(&ssnText)
+	formContent.Append(&ssnLabel.Widget)
+	ssnEntry = gtklib.NewEntry()
+	ssnEntry.SetText(editable.IdentitySSN)
+	ssnEntry.SetVisibility(false)
+	formContent.Append(&ssnEntry.Widget)
+
+	passportText := "Passport number"
+	passportLabel := gtklib.NewLabel(&passportText)
+	formContent.Append(&passportLabel.Widget)
+	passportEntry = gtklib.NewEntry()
+	passportEntry.SetText(editable.IdentityPassportNumber)
+	passportEntry.SetVisibility(false)
+	formContent.Append(&passportEntry.Widget)
+
+	licenseText := "License number"
+	licenseLabel := gtklib.NewLabel(&licenseText)
+	formContent.Append(&licenseLabel.Widget)
+	licenseEntry = gtklib.NewEntry()
+	licenseEntry.SetText(editable.IdentityLicenseNumber)
+	licenseEntry.SetVisibility(false)
+	formContent.Append(&licenseEntry.Widget)
+	return
 }
 
 // renderStatus updates the status label.

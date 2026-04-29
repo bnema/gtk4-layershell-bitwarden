@@ -147,13 +147,22 @@ func (o *Overlay) Run(ctx context.Context) error {
 	o.retain(activateCb)
 	app.ConnectActivate(&activateCb)
 
+	// quitCh is closed when app.Run returns, so the context-wait goroutine
+	// does not block forever if Run finishes before the context is cancelled.
+	quitCh := make(chan struct{})
+
 	// Handle context cancellation (quit the app).
 	go func() {
-		<-ctx.Done()
-		idleAddOnce(func() { app.Quit() })
+		select {
+		case <-ctx.Done():
+			idleAddOnce(func() { app.Quit() })
+		case <-quitCh:
+			// app.Run already returned; nothing to do.
+		}
 	}()
 
 	app.Run(0, nil)
+	close(quitCh)
 
 	o.runMu.Lock()
 	err := o.runErr

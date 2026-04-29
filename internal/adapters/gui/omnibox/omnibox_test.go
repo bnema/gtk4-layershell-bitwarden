@@ -97,8 +97,9 @@ func TestOpenDetail(t *testing.T) {
 
 func TestOpenDetail_NoRows(t *testing.T) {
 	s := NewState()
+	s.Mode = ModeSearch
 	s.OpenDetail()
-	require.Equal(t, ModeUnlock, s.Mode, "should not change mode with no rows")
+	require.Equal(t, ModeSearch, s.Mode, "should not change mode with no rows")
 }
 
 func TestBack(t *testing.T) {

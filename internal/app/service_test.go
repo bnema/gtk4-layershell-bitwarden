@@ -2,7 +2,7 @@ package app
 
 import (
 	"context"
-	"crypto/sha256"
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -18,6 +18,7 @@ import (
 	coresync "github.com/bnema/gtk4-layershell-bitwarden/internal/core/sync"
 	"github.com/bnema/gtk4-layershell-bitwarden/internal/core/vault"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/crypto/argon2"
 )
 
 // fakeOutbox implements ports.OutboxStore for testing.
@@ -87,15 +88,26 @@ type fakeRemote struct {
 	deleteErr error
 
 	// Override hooks (for testing lifecycle)
-	onLogin  func(ctx context.Context, email, password string) error
-	onCreate func(ctx context.Context, item vault.Item) (vault.Item, error)
-	onSync   func(ctx context.Context) ([]vault.Item, []vault.Folder, string, error)
+	onLogin      func(ctx context.Context, email, password string) error
+	loginEnterCh chan struct{} // signaled when Login is entered (before hook)
+	onCreate     func(ctx context.Context, item vault.Item) (vault.Item, error)
+	onSync       func(ctx context.Context) ([]vault.Item, []vault.Folder, string, error)
+	syncEnterCh  chan struct{} // signaled when Sync enters (before block)
 }
 
 func (r *fakeRemote) Login(ctx context.Context, email, password string) error {
 	r.mu.Lock()
 	onLogin := r.onLogin
+	enterCh := r.loginEnterCh
 	r.mu.Unlock()
+
+	// Signal that Login has been entered (non-blocking).
+	if enterCh != nil {
+		select {
+		case enterCh <- struct{}{}:
+		default:
+		}
+	}
 
 	if onLogin != nil {
 		return onLogin(ctx, email, password)
@@ -129,11 +141,20 @@ func (r *fakeRemote) Sync(ctx context.Context) ([]vault.Item, []vault.Folder, st
 	r.mu.Lock()
 	onSync := r.onSync
 	blockCh := r.syncBlockCh
+	enterCh := r.syncEnterCh
 	items := r.syncItems
 	folders := r.syncFolders
 	rev := r.syncRev
 	err := r.syncErr
 	r.mu.Unlock()
+
+	// Signal that Sync has been entered (non-blocking).
+	if enterCh != nil {
+		select {
+		case enterCh <- struct{}{}:
+		default:
+		}
+	}
 
 	if onSync != nil {
 		return onSync(ctx)
@@ -273,7 +294,7 @@ func (f *fakeSecretBox) Open(ciphertext, key []byte) ([]byte, error) {
 // ---------------------------------------------------------------------------
 
 // buildValidSnapshot creates a cache.Snapshot containing items as a PlainSnapshot,
-// encrypted (via secretbox) with a key derived from the given password.
+// encrypted (via secretbox) with an Argon2id-derived key from the given password.
 func buildValidSnapshot(t *testing.T, password string, items []vault.Item, folders []vault.Folder) cache.Snapshot {
 	t.Helper()
 
@@ -294,10 +315,14 @@ func buildValidSnapshot(t *testing.T, password string, items []vault.Item, folde
 	plainJSON, err := json.Marshal(plain)
 	require.NoError(t, err)
 
-	key := sha256.Sum256([]byte(password))
+	salt := make([]byte, 16)
+	_, err = rand.Read(salt)
+	require.NoError(t, err)
+
+	key := argon2.IDKey([]byte(password), salt, 3, 64*1024, 4, 32)
 
 	box := &fakeSecretBox{}
-	ciphertext, err := box.Seal(plainJSON, key[:])
+	ciphertext, err := box.Seal(plainJSON, key)
 	require.NoError(t, err)
 
 	return cache.Snapshot{
@@ -305,6 +330,7 @@ func buildValidSnapshot(t *testing.T, password string, items []vault.Item, folde
 		AccountHash:     "test-account-hash",
 		LastRevision:    "rev-1",
 		SavedAt:         time.Now(),
+		CacheKeySalt:    salt,
 		VaultCiphertext: ciphertext,
 	}
 }
@@ -466,6 +492,15 @@ func (s *Service) conflictsForTest() []coresync.Conflict {
 	result := make([]coresync.Conflict, len(s.conflicts))
 	copy(result, s.conflicts)
 	return result
+}
+
+func (s *Service) installUnlockedStateForTest(key []byte, items []vault.Item) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.state = auth.LockStateUnlocked
+	s.cacheKey = append(s.cacheKey[:0], key...)
+	s.items = append(s.items[:0], items...)
+	s.rebuildIndexLocked()
 }
 
 // ---------------------------------------------------------------------------
@@ -696,6 +731,7 @@ func TestLockCancelsSyncInstall(t *testing.T) {
 	fr := &fakeRemote{
 		revisionRev: "rev2",
 		syncBlockCh: make(chan struct{}),
+		syncEnterCh: make(chan struct{}, 1),
 		syncItems:   []vault.Item{{ID: "remote-1", Name: "ShouldNotAppear"}},
 	}
 
@@ -717,13 +753,12 @@ func TestLockCancelsSyncInstall(t *testing.T) {
 	}()
 
 	// Wait for syncOnce to reach Remote.Sync (which blocks on syncBlockCh).
-	time.Sleep(50 * time.Millisecond)
+	<-fr.syncEnterCh
 
 	// Cancel context — simulates Lock cancelling workers.
 	cancel()
 
 	// Unblock Sync after cancel has taken effect.
-	time.Sleep(10 * time.Millisecond)
 	close(fr.syncBlockCh)
 
 	wg.Wait()
@@ -760,15 +795,18 @@ func TestUnlockLoadsOutboxFromCacheAndOutboxStore(t *testing.T) {
 		OutboxJSON:   outboxJSON,
 	}
 	plainJSON, _ := json.Marshal(plain)
-	key := sha256.Sum256([]byte("mypassword"))
+	salt := make([]byte, 16)
+	_, _ = rand.Read(salt)
+	key := argon2.IDKey([]byte("mypassword"), salt, 3, 64*1024, 4, 32)
 	box := &fakeSecretBox{}
-	ciphertext, _ := box.Seal(plainJSON, key[:])
+	ciphertext, _ := box.Seal(plainJSON, key)
 
 	snap := cache.Snapshot{
 		Version:         cache.Version,
 		AccountHash:     "test-account-hash",
 		LastRevision:    "rev-1",
 		SavedAt:         time.Now(),
+		CacheKeySalt:    salt,
 		VaultCiphertext: ciphertext,
 	}
 
@@ -821,15 +859,18 @@ func TestUnlockDeduplicatesOutboxMutations(t *testing.T) {
 		OutboxJSON:   outboxJSON,
 	}
 	plainJSON, _ := json.Marshal(plain)
-	key := sha256.Sum256([]byte("mypassword"))
+	salt := make([]byte, 16)
+	_, _ = rand.Read(salt)
+	key := argon2.IDKey([]byte("mypassword"), salt, 3, 64*1024, 4, 32)
 	box := &fakeSecretBox{}
-	ciphertext, _ := box.Seal(plainJSON, key[:])
+	ciphertext, _ := box.Seal(plainJSON, key)
 
 	snap := cache.Snapshot{
 		Version:         cache.Version,
 		AccountHash:     "test-account-hash",
 		LastRevision:    "rev-1",
 		SavedAt:         time.Now(),
+		CacheKeySalt:    salt,
 		VaultCiphertext: ciphertext,
 	}
 
@@ -880,24 +921,36 @@ func TestLockZeroesCacheKey(t *testing.T) {
 	err := svc.Unlock(context.Background(), "user@test.com", "mypassword")
 	require.NoError(t, err)
 
-	// Grab a reference to cacheKey before Lock clears it.
+	// Capture the cacheKey slice reference and copy its contents before Lock.
 	svc.mu.Lock()
-	oldKey := svc.cacheKey
-	oldCopy := make([]byte, len(oldKey))
-	copy(oldCopy, oldKey)
+	preKey := svc.cacheKey
+	preCopy := make([]byte, len(preKey))
+	copy(preCopy, preKey)
 	svc.mu.Unlock()
 
-	require.NotNil(t, oldKey, "cacheKey should be set after unlock")
+	require.NotNil(t, preKey, "cacheKey should be set after unlock")
+	require.NotEmpty(t, preCopy, "cacheKey copy should be non-empty")
 
 	err = svc.Lock(context.Background())
 	require.NoError(t, err)
 
-	// After Lock, oldKey bytes should be zeroed.
-	for i, b := range oldCopy {
-		if oldKey[i] != 0 {
-			t.Fatalf("cacheKey byte %d not zeroed: got %d", i, b)
+	// After Lock, the original backing array must be zeroed.
+	for i := range preCopy {
+		if preKey[i] != 0 {
+			t.Fatalf("cacheKey byte %d not zeroed: got %d", i, preKey[i])
 		}
 	}
+
+	// The copy we made before Lock should differ from the zeroed array
+	// (unless the original was already all zeros, which shouldn't happen).
+	allZero := true
+	for _, b := range preCopy {
+		if b != 0 {
+			allZero = false
+			break
+		}
+	}
+	require.False(t, allZero, "pre-lock cacheKey should not be all zeros")
 
 	svc.mu.Lock()
 	require.Nil(t, svc.cacheKey, "cacheKey should be nil after Lock")
@@ -1175,6 +1228,7 @@ func TestLockDuringUnlockPreventsInstall(t *testing.T) {
 	loginBlockCh := make(chan struct{})
 
 	fr := &fakeRemote{
+		loginEnterCh: make(chan struct{}, 1),
 		onLogin: func(_ context.Context, _, _ string) error {
 			<-loginBlockCh
 			return nil
@@ -1198,7 +1252,7 @@ func TestLockDuringUnlockPreventsInstall(t *testing.T) {
 	}()
 
 	// Wait for Unlock to reach Login (blocked).
-	time.Sleep(50 * time.Millisecond)
+	<-fr.loginEnterCh
 
 	// Call Lock while Unlock is blocked on login.
 	lockErr := svc.Lock(context.Background())

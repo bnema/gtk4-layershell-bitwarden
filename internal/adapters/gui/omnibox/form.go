@@ -55,6 +55,10 @@ func EditableFromItem(item vault.Item) EditableItem {
 				e.URI = item.Login.URIs[0].URI
 			}
 		}
+	case vault.ItemTypeSecureNote:
+		if item.SecureNote != nil && item.SecureNote.Text != "" {
+			e.Notes = item.SecureNote.Text
+		}
 	case vault.ItemTypeCard:
 		if item.Card != nil {
 			e.CardholderName = item.Card.CardholderName

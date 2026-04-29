@@ -32,7 +32,8 @@ func (a *Adapter) Warn(msg string, attrs ...any)  { a.logger.Warn(msg, a.redact(
 func (a *Adapter) Error(msg string, attrs ...any) { a.logger.Error(msg, a.redact(attrs...)...) }
 
 // redact returns a copy of attrs with sensitive values replaced by
-// "[REDACTED]". It recurses one level into slog.Group attrs.
+// "[REDACTED]". Groups are recursed (nested groups are handled by
+// redactGroupValue, which processes all child attributes recursively).
 func (a *Adapter) redact(args ...any) []any {
 	result := make([]any, 0, len(args))
 	for i := 0; i < len(args); {
@@ -98,10 +99,33 @@ func redactValue(val any) any {
 	return val
 }
 
+// shouldRedact returns true when key (when lowercased) contains one of the
+// redactKeys as a whole-word segment delimited by '_', '-', '.', or boundary.
+// This avoids over-redacting keys like "monkey" just because they contain "key".
 func shouldRedact(key string) bool {
 	lower := strings.ToLower(key)
 	for _, k := range redactKeys {
-		if strings.Contains(lower, k) {
+		if hasWord(lower, k) {
+			return true
+		}
+	}
+	return false
+}
+
+// hasWord reports whether substr appears as a whole word in s, where word
+// boundaries are start-of-string, end-of-string, '_', '-', or '.'.
+func hasWord(s, substr string) bool {
+	for i := 0; i <= len(s)-len(substr); i++ {
+		if s[i:i+len(substr)] == substr {
+			// check character before match
+			if i > 0 && s[i-1] != '_' && s[i-1] != '-' && s[i-1] != '.' {
+				continue
+			}
+			// check character after match
+			end := i + len(substr)
+			if end < len(s) && s[end] != '_' && s[end] != '-' && s[end] != '.' {
+				continue
+			}
 			return true
 		}
 	}

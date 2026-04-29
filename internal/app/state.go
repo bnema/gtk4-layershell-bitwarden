@@ -31,6 +31,8 @@ type Service struct {
 	state         auth.LockState
 	lifecycle     uint64
 	cacheKey      []byte
+	cacheSalt     []byte
+	outboxSeq     uint64
 	items         []vault.Item
 	folders       []vault.Folder
 	outbox        []coresync.OutboxMutation

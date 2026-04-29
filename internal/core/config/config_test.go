@@ -54,6 +54,17 @@ func TestAcceptBoundaryScale(t *testing.T) {
 	}
 }
 
+func TestAcceptZeroScaleAsUnset(t *testing.T) {
+	cfg := Default()
+	cfg.Bitwarden.Email = "test@example.com"
+
+	// UIScale zero means unset/default, must not be rejected
+	cfg.Appearance.UIScale = 0.0
+	if err := Validate(cfg); err != nil {
+		t.Errorf("expected no error for 0.0 (unset), got %v", err)
+	}
+}
+
 func TestRejectInvalidRegion(t *testing.T) {
 	cfg := Default()
 	cfg.Bitwarden.Email = "test@example.com"
@@ -65,38 +76,30 @@ func TestRejectInvalidRegion(t *testing.T) {
 }
 
 func TestRejectBadSelfHostedURL(t *testing.T) {
-	cfg := Default()
-	cfg.Bitwarden.Email = "test@example.com"
-	cfg.Bitwarden.Region = RegionSelfHosted
-
-	// Empty URL
-	cfg.Bitwarden.ServerURL = ""
-	if err := Validate(cfg); err != ErrInvalidServerURL {
-		t.Errorf("expected ErrInvalidServerURL for empty URL, got %v", err)
+	cases := []struct {
+		name string
+		url  string
+	}{
+		{name: "empty", url: ""},
+		{name: "http", url: "http://example.com"},
+		{name: "relative", url: "/relative/path"},
+		{name: "hostless", url: "https://"},
+		{name: "query", url: "https://vault.example.com?token=leaky"},
+		{name: "userinfo", url: "https://user:pass@vault.example.com"},
+		{name: "fragment", url: "https://vault.example.com#section"},
 	}
 
-	// HTTP URL
-	cfg.Bitwarden.ServerURL = "http://example.com"
-	if err := Validate(cfg); err != ErrInvalidServerURL {
-		t.Errorf("expected ErrInvalidServerURL for http URL, got %v", err)
-	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := Default()
+			cfg.Bitwarden.Email = "test@example.com"
+			cfg.Bitwarden.Region = RegionSelfHosted
+			cfg.Bitwarden.ServerURL = tc.url
 
-	// Relative URL
-	cfg.Bitwarden.ServerURL = "/relative/path"
-	if err := Validate(cfg); err != ErrInvalidServerURL {
-		t.Errorf("expected ErrInvalidServerURL for relative URL, got %v", err)
-	}
-
-	// Hostless HTTPS URL
-	cfg.Bitwarden.ServerURL = "https://"
-	if err := Validate(cfg); err != ErrInvalidServerURL {
-		t.Errorf("expected ErrInvalidServerURL for hostless URL, got %v", err)
-	}
-
-	// URL with query must be rejected
-	cfg.Bitwarden.ServerURL = "https://vault.example.com?token=leaky"
-	if err := Validate(cfg); err != ErrInvalidServerURL {
-		t.Errorf("expected ErrInvalidServerURL for query URL, got %v", err)
+			if err := Validate(cfg); err != ErrInvalidServerURL {
+				t.Errorf("expected ErrInvalidServerURL for %s, got %v", tc.name, err)
+			}
+		})
 	}
 }
 
@@ -108,28 +111,6 @@ func TestAcceptSelfHostedURL(t *testing.T) {
 
 	if err := Validate(cfg); err != nil {
 		t.Errorf("expected no error for valid self-hosted URL, got %v", err)
-	}
-}
-
-func TestRejectSelfHostedURLWithUserinfo(t *testing.T) {
-	cfg := Default()
-	cfg.Bitwarden.Email = "test@example.com"
-	cfg.Bitwarden.Region = RegionSelfHosted
-	cfg.Bitwarden.ServerURL = "https://user:pass@vault.example.com"
-
-	if err := Validate(cfg); err != ErrInvalidServerURL {
-		t.Errorf("expected ErrInvalidServerURL for URL with userinfo, got %v", err)
-	}
-}
-
-func TestRejectSelfHostedURLWithFragment(t *testing.T) {
-	cfg := Default()
-	cfg.Bitwarden.Email = "test@example.com"
-	cfg.Bitwarden.Region = RegionSelfHosted
-	cfg.Bitwarden.ServerURL = "https://vault.example.com#section"
-
-	if err := Validate(cfg); err != ErrInvalidServerURL {
-		t.Errorf("expected ErrInvalidServerURL for URL with fragment, got %v", err)
 	}
 }
 

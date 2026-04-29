@@ -50,10 +50,11 @@ func NewRootCommand(opts Options) *cobra.Command {
 				return fmt.Errorf("compose service: %w", err)
 			}
 
-			// Start config hot-reload watcher.
+			// Start config hot-reload watcher using the command's context so that
+			// cancellation propagates to the UpdateConfig call.
 			go func() {
 				_ = mgr.Watch(cmd.Context(), func(newCfg *coreconfig.Config) {
-					if uerr := svc.UpdateConfig(context.Background(), newCfg); uerr != nil {
+					if uerr := svc.UpdateConfig(cmd.Context(), newCfg); uerr != nil {
 						// Log via redacting logger; do not panic on invalid reload.
 						_ = uerr // ignored to avoid noise if no logger available
 					}
@@ -217,6 +218,22 @@ func newConfigCmd(opts Options) *cobra.Command {
 // Cache subcommand
 // ---------------------------------------------------------------------------
 
+// clearCacheAndOutbox clears both the cache and outbox stores, returning an
+// error if either operation fails.
+func clearCacheAndOutbox(ctx context.Context, cachePath, outboxPath string) error {
+	box := cryptobox.NewBox()
+	cacheStore := cachefile.NewStore(cachePath)
+	outboxStore := cachefile.NewOutboxStore(outboxPath, box)
+
+	if err := cacheStore.Clear(ctx); err != nil {
+		return fmt.Errorf("cache clear: %w", err)
+	}
+	if err := outboxStore.Clear(ctx); err != nil {
+		return fmt.Errorf("outbox clear: %w", err)
+	}
+	return nil
+}
+
 // newCacheCmd creates the "cache" command with a "clear" subcommand.
 func newCacheCmd(cachePath, outboxPath string) *cobra.Command {
 	cmd := &cobra.Command{
@@ -229,15 +246,8 @@ func newCacheCmd(cachePath, outboxPath string) *cobra.Command {
 		Short: "Clear the cache",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			box := cryptobox.NewBox()
-			cacheStore := cachefile.NewStore(cachePath)
-			outboxStore := cachefile.NewOutboxStore(outboxPath, box)
-
-			if err := cacheStore.Clear(cmd.Context()); err != nil {
-				return fmt.Errorf("cache clear: %w", err)
-			}
-			if err := outboxStore.Clear(cmd.Context()); err != nil {
-				return fmt.Errorf("outbox clear: %w", err)
+			if err := clearCacheAndOutbox(cmd.Context(), cachePath, outboxPath); err != nil {
+				return err
 			}
 			cmd.Println("cache cleared")
 			return nil
@@ -258,15 +268,8 @@ func newLogoutCmd(cachePath, outboxPath string) *cobra.Command {
 		Short: "Log out of Bitwarden",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			box := cryptobox.NewBox()
-			cacheStore := cachefile.NewStore(cachePath)
-			outboxStore := cachefile.NewOutboxStore(outboxPath, box)
-
-			if err := cacheStore.Clear(cmd.Context()); err != nil {
-				return fmt.Errorf("cache clear: %w", err)
-			}
-			if err := outboxStore.Clear(cmd.Context()); err != nil {
-				return fmt.Errorf("outbox clear: %w", err)
+			if err := clearCacheAndOutbox(cmd.Context(), cachePath, outboxPath); err != nil {
+				return err
 			}
 			cmd.Println("logged out")
 			return nil
@@ -278,13 +281,22 @@ func newLogoutCmd(cachePath, outboxPath string) *cobra.Command {
 // Sync subcommand
 // ---------------------------------------------------------------------------
 
-// newSyncCmd creates the "sync" subcommand with a --force flag.
+// newSyncCmd creates the "sync" subcommand. A --force flag is accepted for
+// future use but currently sync runs automatically after unlock.
 func newSyncCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "sync",
 		Short: "Sync with Bitwarden",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			force, err := cmd.Flags().GetBool("force")
+			if err != nil {
+				return err
+			}
+			if force {
+				cmd.Println("force sync requested; sync runs automatically after unlock")
+				return nil
+			}
 			cmd.Println("sync runs automatically after unlock")
 			return nil
 		},

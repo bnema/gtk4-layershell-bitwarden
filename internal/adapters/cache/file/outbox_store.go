@@ -149,12 +149,18 @@ func (s *OutboxStore) Save(ctx context.Context, key []byte, mutations []coresync
 	}
 
 	// Write atomically: temp file in same directory, fsync, chmod, rename.
+	// Use closeOnError flag to avoid double-close on success path.
 	tmpFile := s.path + ".tmp"
 	f, err := os.OpenFile(tmpFile, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
 	if err != nil {
 		return err
 	}
-	defer f.Close() //nolint:errcheck
+	closeOnError := true
+	defer func() {
+		if closeOnError {
+			_ = f.Close()
+		}
+	}()
 
 	if _, err := f.Write(data); err != nil {
 		_ = os.Remove(tmpFile) // best-effort cleanup
@@ -176,6 +182,7 @@ func (s *OutboxStore) Save(ctx context.Context, key []byte, mutations []coresync
 		return err
 	}
 
+	closeOnError = false
 	if err := f.Close(); err != nil {
 		_ = os.Remove(tmpFile)
 		return err

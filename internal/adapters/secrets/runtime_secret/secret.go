@@ -13,17 +13,20 @@ func NewRunner() Runner { return Runner{} }
 func (Runner) Do(fn func()) { secret.Do(fn) }
 
 // Bytes copies value into an owned buffer, runs fn inside secret.Do with the
-// copy, then zeroes the buffer. Mutating the slice passed to fn does not
-// affect the original input.
+// copy, then zeroes the buffer inside the secret.Do scope via defer so a panic
+// inside fn cannot skip wiping. Mutating the slice passed to fn does not affect
+// the original input.
 func (Runner) Bytes(value []byte, fn func([]byte)) {
 	buf := make([]byte, len(value))
 	copy(buf, value)
 	secret.Do(func() {
+		defer func() {
+			for i := range buf {
+				buf[i] = 0
+			}
+		}()
 		fn(buf)
 	})
-	for i := range buf {
-		buf[i] = 0
-	}
 }
 
 // String runs fn(value) inside secret.Do.

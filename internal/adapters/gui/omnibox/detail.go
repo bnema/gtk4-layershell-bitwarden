@@ -3,6 +3,7 @@ package omnibox
 import (
 	"strings"
 
+	"github.com/bnema/gtk4-layershell-bitwarden/internal/adapters/gui/display"
 	"github.com/bnema/gtk4-layershell-bitwarden/internal/core/vault"
 )
 
@@ -57,7 +58,7 @@ func DetailFromItem(item vault.Item) Detail {
 	case vault.ItemTypeCard:
 		if item.Card != nil {
 			d.CardBrand = item.Card.Brand
-			d.CardLast4 = safeLast4(item.Card.Number)
+			d.CardLast4 = display.SafeLast4(item.Card.Number)
 			// CodePresent is implied by presence but not exposed as a field.
 			// Last4 only, never full number or code.
 		}

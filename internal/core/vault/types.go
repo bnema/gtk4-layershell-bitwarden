@@ -1,6 +1,10 @@
 package vault
 
-import "time"
+import (
+	"encoding/json"
+	"strconv"
+	"time"
+)
 
 // ItemType represents the type of a vault item.
 type ItemType string
@@ -50,6 +54,11 @@ type Login struct {
 }
 
 // SecureNote represents a secure note item's content.
+//
+// The Text field holds the secure note body. On an Item of type SecureNote,
+// the same text is also stored at Item.Notes for backward compatibility with
+// plain-text note displays. Consumers should read from Notes when they need
+// the body text; SecureNote.Text mirrors Notes for SDK round-trip fidelity.
 type SecureNote struct {
 	Text string `json:"text"`
 }
@@ -104,8 +113,35 @@ type Field struct {
 type Attachment struct {
 	ID       string `json:"id"`
 	FileName string `json:"fileName"`
-	Size     string `json:"size"`
+	Size     int64  `json:"size"`
 	URL      string `json:"url"`
+}
+
+// UnmarshalJSON implements json.Unmarshaler for Attachment to accept Size as
+// either a JSON number or a quoted decimal string (some servers send strings).
+func (a *Attachment) UnmarshalJSON(data []byte) error {
+	// Alias to avoid infinite recursion.
+	type attachmentAlias Attachment
+
+	var raw struct {
+		attachmentAlias
+		Size json.Number `json:"size"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+
+	*a = Attachment(raw.attachmentAlias)
+
+	if raw.Size.String() != "" {
+		n, err := strconv.ParseInt(raw.Size.String(), 10, 64)
+		if err != nil {
+			return err
+		}
+		a.Size = n
+	}
+
+	return nil
 }
 
 // Folder represents a folder for organising vault items.

@@ -69,15 +69,21 @@ func (s *Store) Save(ctx context.Context, snapshot cache.Snapshot) error {
 	}
 
 	// Write atomically: temp file in same directory, fsync, rename.
+	// Use closeOnError flag to avoid double-close on success path.
 	tmpFile := s.path + ".tmp"
 	f, err := os.OpenFile(tmpFile, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
 	if err != nil {
 		return err
 	}
-	defer f.Close() //nolint:errcheck
+	closeOnError := true
+	defer func() {
+		if closeOnError {
+			_ = f.Close()
+		}
+	}()
 
 	if _, err := f.Write(data); err != nil {
-		_ = os.Remove(tmpFile) // best-effort cleanup, ignore error
+		_ = os.Remove(tmpFile)
 		return err
 	}
 
@@ -91,6 +97,7 @@ func (s *Store) Save(ctx context.Context, snapshot cache.Snapshot) error {
 		return err
 	}
 
+	closeOnError = false
 	if err := f.Close(); err != nil {
 		_ = os.Remove(tmpFile)
 		return err

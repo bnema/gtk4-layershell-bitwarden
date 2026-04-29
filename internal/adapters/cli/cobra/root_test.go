@@ -245,7 +245,7 @@ func TestSyncWithForcePrintsMessage(t *testing.T) {
 
 	out, err := executeCmd(t, opts, []string{"sync", "--force"})
 	require.NoError(t, err)
-	assert.Contains(t, out, "sync runs automatically after unlock")
+	assert.Contains(t, out, "force sync requested")
 }
 
 func TestRootCommandHandlesMissingConfigFile(t *testing.T) {

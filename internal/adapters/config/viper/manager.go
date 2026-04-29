@@ -4,12 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/fsnotify/fsnotify"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 
+	"github.com/fsnotify/fsnotify"
 	"github.com/pelletier/go-toml/v2"
 	"github.com/spf13/viper"
 
@@ -277,10 +277,12 @@ func (m *Manager) Save(ctx context.Context, cfg *coreconfig.Config) error {
 	return nil
 }
 
-// Watch starts watching the config file for changes. It returns immediately
-// after installing the watcher. The onChange callback is invoked whenever the
-// file changes, but only if ctx is not yet done. When ctx is cancelled the
-// callback will no longer be called.
+// Watch installs a Viper file watcher. The onChange callback is invoked
+// whenever the config file changes, but only if ctx is not yet done. When ctx
+// is cancelled the callback is no longer invoked.
+//
+// Note: viper's WatchConfig runs its own goroutine internally; we do not need
+// to spawn a goroutine to wait on ctx.Done().
 func (m *Manager) Watch(ctx context.Context, onChange func(*coreconfig.Config)) error {
 	m.mu.RLock()
 	v := m.v
@@ -297,10 +299,6 @@ func (m *Manager) Watch(ctx context.Context, onChange func(*coreconfig.Config)) 
 		m.mu.Unlock()
 		onChange(cfg)
 	})
-
-	go func() {
-		<-ctx.Done()
-	}()
 
 	return nil
 }

@@ -143,7 +143,7 @@ func TestMapAttachmentAndFolder(t *testing.T) {
 	coreAtt := toCoreAttachment(sdkAtt)
 	assert.Equal(t, "att-1", coreAtt.ID)
 	assert.Equal(t, "receipt.pdf", coreAtt.FileName)
-	assert.Equal(t, "102400", coreAtt.Size)
+	assert.Equal(t, int64(102400), coreAtt.Size)
 	assert.Equal(t, "https://example.com/att/1", coreAtt.URL)
 
 	// SDK Folder → core Folder.
@@ -193,6 +193,37 @@ func TestMapSecureNoteRoundTrip(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, corevault.ItemTypeSecureNote, result.Type)
 	require.NotNil(t, result.SecureNote)
+}
+
+func TestMapFieldTypeParseErrorDefaultsToZero(t *testing.T) {
+	// When core Field.Type is empty or non-numeric, strconv.Atoi returns 0
+	// (the safe default for SDK field type 0 = text). This verifies the
+	// silent-default behaviour documented in toSDKItem.
+	coreItem := corevault.Item{
+		ID:    "item-ft-1",
+		Name:  "Field Type Test",
+		Type:  corevault.ItemTypeLogin,
+		Login: &corevault.Login{Username: "u"},
+		Fields: []corevault.Field{
+			{Name: "empty", Value: "v1", Type: "", Hidden: false},
+			{Name: "garbage", Value: "v2", Type: "not-a-number", Hidden: false},
+			{Name: "valid", Value: "v3", Type: "1", Hidden: true},
+		},
+	}
+
+	sdkItem := toSDKItem(coreItem)
+	require.Len(t, sdkItem.Fields, 3)
+	assert.Equal(t, 0, sdkItem.Fields[0].Type, "empty Type string defaults to 0")
+	assert.Equal(t, 0, sdkItem.Fields[1].Type, "non-numeric Type string defaults to 0")
+	assert.Equal(t, 1, sdkItem.Fields[2].Type, "valid '1' Type string parses correctly")
+
+	// Round-trip back to core: Hidden should be true for Type 1, false for 0.
+	result, err := toCoreItem(sdkItem)
+	require.NoError(t, err)
+	require.Len(t, result.Fields, 3)
+	assert.False(t, result.Fields[0].Hidden, "Type 0 → Hidden false")
+	assert.False(t, result.Fields[1].Hidden, "Type 0 → Hidden false")
+	assert.True(t, result.Fields[2].Hidden, "Type 1 → Hidden true")
 }
 
 func TestMapLoginItemToSDK(t *testing.T) {

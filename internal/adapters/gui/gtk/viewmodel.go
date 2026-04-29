@@ -1,9 +1,9 @@
 package gtk
 
 import (
-	"net/url"
 	"strings"
 
+	"github.com/bnema/gtk4-layershell-bitwarden/internal/adapters/gui/display"
 	corevault "github.com/bnema/gtk4-layershell-bitwarden/internal/core/vault"
 	"github.com/bnema/gtk4-layershell-bitwarden/internal/ports/in"
 )
@@ -124,7 +124,7 @@ func DetailFromItem(item corevault.Item) DetailViewModel {
 		if item.Card != nil {
 			vm.CardholderName = item.Card.CardholderName
 			vm.Brand = item.Card.Brand
-			vm.Last4 = safeLast4(item.Card.Number)
+			vm.Last4 = display.SafeLast4(item.Card.Number)
 			vm.ExpMonth = item.Card.ExpMonth
 			vm.ExpYear = item.Card.ExpYear
 			vm.CodePresent = item.Card.Code != ""
@@ -195,83 +195,8 @@ func StatusFromEvent(evt in.Event) StatusViewModel {
 // --- helpers ---
 
 // buildRowSubtitle builds a safe one-line subtitle for a vault item row.
-// Sensitive data (passwords, TOTP, card codes, SSN, passport, license) is never included.
 func buildRowSubtitle(item corevault.Item) string {
-	switch item.Type {
-	case corevault.ItemTypeLogin:
-		if item.Login == nil {
-			return ""
-		}
-		parts := make([]string, 0, 2)
-		if item.Login.Username != "" {
-			parts = append(parts, item.Login.Username)
-		}
-		if len(item.Login.URIs) > 0 {
-			parts = append(parts, safeURI(item.Login.URIs[0].URI))
-		}
-		return strings.Join(parts, " — ")
-
-	case corevault.ItemTypeSecureNote:
-		return "Secure note"
-
-	case corevault.ItemTypeCard:
-		if item.Card == nil {
-			return ""
-		}
-		parts := make([]string, 0, 2)
-		if item.Card.Brand != "" {
-			parts = append(parts, item.Card.Brand)
-		}
-		if last4 := safeLast4(item.Card.Number); last4 != "" {
-			parts = append(parts, "•••• "+last4)
-		}
-		return strings.Join(parts, " ")
-
-	case corevault.ItemTypeIdentity:
-		if item.Identity == nil {
-			return ""
-		}
-		parts := make([]string, 0, 4)
-		if item.Identity.FirstName != "" {
-			parts = append(parts, item.Identity.FirstName)
-		}
-		if item.Identity.LastName != "" {
-			parts = append(parts, item.Identity.LastName)
-		}
-		if item.Identity.Email != "" {
-			parts = append(parts, item.Identity.Email)
-		}
-		if item.Identity.Username != "" {
-			parts = append(parts, item.Identity.Username)
-		}
-		return strings.Join(parts, " — ")
-
-	default:
-		return ""
-	}
-}
-
-// safeURI attempts to extract just the host from a URI string.
-// If parsing fails, the raw URI is returned with query/fragment stripped.
-func safeURI(raw string) string {
-	u, err := url.Parse(raw)
-	if err != nil || u.Host == "" {
-		// Fallback: strip query and fragment manually
-		if idx := strings.IndexAny(raw, "?#"); idx >= 0 {
-			return raw[:idx]
-		}
-		return raw
-	}
-	return u.Host
-}
-
-// safeLast4 returns the last 4 characters of a card number if it is at
-// least 4 characters long. Returns empty string otherwise.
-func safeLast4(number string) string {
-	if len(number) < 4 {
-		return ""
-	}
-	return number[len(number)-4:]
+	return display.BuildRowSubtitle(item)
 }
 
 // buildBadge returns a short text badge for the row item state.
