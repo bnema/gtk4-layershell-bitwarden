@@ -18,6 +18,7 @@ type Deps struct {
 	SecretBox out.SecretBox
 	Outbox    out.OutboxStore
 	Clock     out.Clock
+	Logger    out.Logger
 	Config    *config.Config
 }
 

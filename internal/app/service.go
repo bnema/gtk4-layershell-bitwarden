@@ -400,7 +400,9 @@ func (s *Service) saveCacheAsyncLocked() {
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		_ = store.Save(ctx, key, outboxSnap)
+		if err := store.Save(ctx, key, outboxSnap); err != nil && s.deps.Logger != nil {
+			s.deps.Logger.Error("outbox save failed", "error", err)
+		}
 	}()
 }
 

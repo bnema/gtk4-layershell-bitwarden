@@ -1,0 +1,90 @@
+// Package clipboard provides a TTL-based clipboard adapter implementing out.Clipboard.
+package clipboard
+
+import (
+	"context"
+	"sync"
+	"time"
+
+	"github.com/bnema/gtk4-layershell-bitwarden/internal/ports/out"
+)
+
+// Setter is a function that sets the clipboard text.
+type Setter func(string) error
+
+// Clearer is a function that clears the clipboard.
+type Clearer func() error
+
+// Adapter implements out.Clipboard with optional TTL-based auto-clear.
+type Adapter struct {
+	mu      sync.Mutex
+	setter  Setter
+	clearer Clearer
+	timer   *time.Timer
+	value   string
+}
+
+// New returns a new Adapter. If set or clear is nil, safe in-memory defaults
+// are used so that tests and headless environments work without a real clipboard.
+func New(set Setter, clear Clearer) *Adapter {
+	if set == nil {
+		set = func(s string) error { return nil }
+	}
+	if clear == nil {
+		clear = func() error { return nil }
+	}
+	return &Adapter{setter: set, clearer: clear}
+}
+
+// Set writes text to the clipboard and, if ttl > 0, schedules a Clear after
+// ttl. Any previously scheduled timer is cancelled. Respects ctx before setting.
+func (a *Adapter) Set(ctx context.Context, text string, ttl time.Duration) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+	}
+
+	// Cancel any previous clear timer.
+	if a.timer != nil {
+		a.timer.Stop()
+		a.timer = nil
+	}
+
+	if err := a.setter(text); err != nil {
+		return err
+	}
+
+	a.value = text
+
+	if ttl > 0 {
+		a.timer = time.AfterFunc(ttl, func() {
+			a.mu.Lock()
+			defer a.mu.Unlock()
+			_ = a.clearer()
+			a.value = ""
+		})
+	}
+
+	return nil
+}
+
+// Clear cancels any pending timer and clears the clipboard.
+func (a *Adapter) Clear(ctx context.Context) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	if a.timer != nil {
+		a.timer.Stop()
+		a.timer = nil
+	}
+
+	a.value = ""
+	return a.clearer()
+}
+
+// compile-time check
+var _ out.Clipboard = (*Adapter)(nil)
