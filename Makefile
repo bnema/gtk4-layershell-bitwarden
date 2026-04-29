@@ -9,8 +9,8 @@ race:
 lint:
 	golangci-lint run ./...
 
-EXCLUDE_CACHE_CONFIG := internal/adapters/cache/file/store.go internal/adapters/cache/file/outbox_store.go internal/adapters/config/viper/manager.go
-GREP_EXCLUDE := $(foreach p,$(EXCLUDE_CACHE_CONFIG),| grep -v '$(p)')
+EXCLUDE_DISK_HELPERS := internal/adapters/fileutil/atomic.go
+GREP_EXCLUDE := $(foreach p,$(EXCLUDE_DISK_HELPERS),| grep -v '$(p)')
 
 safety:
 	@if grep -RInE --exclude=Makefile --exclude='*_test.go' --exclude-dir=.git 'DumpRequest|DumpResponse|httputil|access_token|refresh_token|password=' .; then \

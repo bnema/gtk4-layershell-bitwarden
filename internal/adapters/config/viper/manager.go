@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 
@@ -13,6 +12,7 @@ import (
 	"github.com/pelletier/go-toml/v2"
 	"github.com/spf13/viper"
 
+	"github.com/bnema/gtk4-layershell-bitwarden/internal/adapters/fileutil"
 	"github.com/bnema/gtk4-layershell-bitwarden/internal/adapters/paths/xdg"
 	coreconfig "github.com/bnema/gtk4-layershell-bitwarden/internal/core/config"
 )
@@ -224,57 +224,14 @@ func (m *Manager) Save(ctx context.Context, cfg *coreconfig.Config) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	// Ensure parent directory exists with 0700
-	dir := filepath.Dir(m.path)
-	if err := os.MkdirAll(dir, 0700); err != nil {
-		return fmt.Errorf("mkdir config dir: %w", err)
-	}
-
 	// Build a nested map with snake_case keys and marshal to TOML
 	data, err := toml.Marshal(configToMap(cfg))
 	if err != nil {
 		return fmt.Errorf("marshal config: %w", err)
 	}
 
-	// Atomic write: unique temp file in same directory + rename. The Manager
-	// mutex serializes one instance, and unique temp names also avoid conflicts
-	// across independent Manager instances pointed at the same config path.
-	f, err := os.CreateTemp(dir, "."+filepath.Base(m.path)+"-*.tmp")
-	if err != nil {
-		return fmt.Errorf("create temp file: %w", err)
-	}
-	tmpPath := f.Name()
-	if err := f.Chmod(0600); err != nil {
-		_ = f.Close()
-		_ = os.Remove(tmpPath)
-		return fmt.Errorf("chmod temp file: %w", err)
-	}
-	closeOnError := true
-	defer func() {
-		if closeOnError {
-			_ = f.Close()
-		}
-	}()
-
-	if _, err := f.Write(data); err != nil {
-		_ = os.Remove(tmpPath)
-		return fmt.Errorf("write temp file: %w", err)
-	}
-
-	if err := f.Sync(); err != nil {
-		_ = os.Remove(tmpPath)
-		return fmt.Errorf("fsync temp file: %w", err)
-	}
-
-	closeOnError = false
-	if err := f.Close(); err != nil {
-		_ = os.Remove(tmpPath)
-		return fmt.Errorf("close temp file: %w", err)
-	}
-
-	if err := os.Rename(tmpPath, m.path); err != nil {
-		_ = os.Remove(tmpPath)
-		return fmt.Errorf("rename config file: %w", err)
+	if err := fileutil.AtomicWriteFile(ctx, m.path, data, 0600); err != nil {
+		return fmt.Errorf("write config file: %w", err)
 	}
 
 	m.cfg = cfg

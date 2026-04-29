@@ -7,9 +7,9 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
-	"path/filepath"
 	"time"
 
+	"github.com/bnema/gtk4-layershell-bitwarden/internal/adapters/fileutil"
 	coresync "github.com/bnema/gtk4-layershell-bitwarden/internal/core/sync"
 	"github.com/bnema/gtk4-layershell-bitwarden/internal/ports/out"
 )
@@ -104,11 +104,7 @@ func (s *OutboxStore) Save(ctx context.Context, key []byte, mutations []coresync
 	}
 
 	if len(mutations) == 0 {
-		err := os.Remove(s.path)
-		if err != nil && !errors.Is(err, fs.ErrNotExist) {
-			return err
-		}
-		return nil
+		return fileutil.RemoveIfExists(s.path)
 	}
 
 	if s.box == nil {
@@ -139,54 +135,5 @@ func (s *OutboxStore) Save(ctx context.Context, key []byte, mutations []coresync
 		return fmt.Errorf("outbox marshal envelope: %w", err)
 	}
 
-	dir := filepath.Dir(s.path)
-	if err := os.MkdirAll(dir, 0700); err != nil {
-		return err
-	}
-
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-
-	// Write atomically: unique temp file in same directory, fsync, chmod, rename.
-	// Unique names avoid overlapping async Save calls clobbering one shared .tmp.
-	f, err := os.CreateTemp(dir, "."+filepath.Base(s.path)+"-*.tmp")
-	if err != nil {
-		return err
-	}
-	tmpFile := f.Name()
-	closeOnError := true
-	defer func() {
-		if closeOnError {
-			_ = f.Close()
-		}
-	}()
-
-	if _, err := f.Write(data); err != nil {
-		_ = os.Remove(tmpFile) // best-effort cleanup
-		return err
-	}
-
-	if err := f.Sync(); err != nil {
-		_ = os.Remove(tmpFile)
-		return err
-	}
-
-	if err := f.Chmod(0600); err != nil {
-		_ = os.Remove(tmpFile)
-		return err
-	}
-
-	if err := ctx.Err(); err != nil {
-		_ = os.Remove(tmpFile)
-		return err
-	}
-
-	closeOnError = false
-	if err := f.Close(); err != nil {
-		_ = os.Remove(tmpFile)
-		return err
-	}
-
-	return os.Rename(tmpFile, s.path)
+	return fileutil.AtomicWriteFile(ctx, s.path, data, 0600)
 }

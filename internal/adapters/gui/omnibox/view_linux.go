@@ -467,9 +467,9 @@ func (v *View) doPrimaryAction() {
 		v.mu.Unlock()
 		return
 	}
-	action := PrimaryActionFor(row, v.service.Config())
 	v.mu.Unlock()
 
+	action := PrimaryActionFor(row, v.service.Config())
 	switch action {
 	case ActionCopyPassword:
 		v.mu.Lock()
