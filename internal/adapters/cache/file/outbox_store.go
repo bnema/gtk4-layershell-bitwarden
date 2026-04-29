@@ -38,6 +38,18 @@ func (s *OutboxStore) Path() string {
 	return s.path
 }
 
+// Clear removes the outbox store file. No error if the file does not exist.
+func (s *OutboxStore) Clear(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	err := os.Remove(s.path)
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	return nil
+}
+
 // Load reads, decrypts, and unmarshals the outbox mutations from disk.
 // Returns nil, nil if the file does not exist (absence is not an error).
 // Requires box != nil and key non-empty when the file exists.

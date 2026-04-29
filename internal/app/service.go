@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"time"
@@ -274,14 +275,60 @@ func (s *Service) Get(ctx context.Context, id string) (vault.Item, error) {
 	return vault.Item{}, cerrors.ErrNotFound
 }
 
-// Config returns the current configuration.
+// Config returns a copy of the current configuration.
+// The caller receives a freshly allocated copy that cannot mutate the
+// service's internal config.
 func (s *Service) Config() *config.Config {
-	return s.cfg
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.cfg == nil {
+		return config.Default()
+	}
+	copied := *s.cfg
+	return &copied
 }
 
 // Events returns a read-only channel of domain events.
 func (s *Service) Events() <-chan Event {
 	return s.events
+}
+
+// UpdateConfig replaces the current configuration with a validated copy.
+// The only validation error tolerated is ErrEmailRequired (matching Load
+// semantics), allowing first-run or hot-reload scenarios without email.
+func (s *Service) UpdateConfig(ctx context.Context, cfg *config.Config) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	// Validate; tolerate only ErrEmailRequired (same as Load semantics).
+	if err := config.Validate(cfg); err != nil {
+		if errors.Is(err, config.ErrEmailRequired) {
+			errs := config.ValidateAll(cfg)
+			onlyEmail := true
+			for _, e := range errs {
+				if !errors.Is(e, config.ErrEmailRequired) {
+					onlyEmail = false
+					break
+				}
+			}
+			if !onlyEmail {
+				return fmt.Errorf("config update: %w", err)
+			}
+		} else {
+			return fmt.Errorf("config update: %w", err)
+		}
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	copied := *cfg
+	s.cfg = &copied
+	s.deps.Config = &copied
+
+	s.emit(SyncUpdated, "config updated")
+	return nil
 }
 
 // Shutdown gracefully shuts down the service.

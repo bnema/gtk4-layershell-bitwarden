@@ -54,6 +54,7 @@ type AppService interface {
 	DeleteAttachment(ctx context.Context, itemID, attachmentID string) error
 	ResolveConflict(ctx context.Context, conflictID string, resolution sync.ConflictResolution) error
 	Config() *config.Config
+	UpdateConfig(ctx context.Context, cfg *config.Config) error
 	Events() <-chan Event
 	Shutdown(ctx context.Context) error
 }

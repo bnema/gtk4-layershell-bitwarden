@@ -1,19 +1,32 @@
 package cobra
 
 import (
+	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strconv"
 
 	"github.com/spf13/cobra"
 
+	cryptobox "github.com/bnema/gtk4-layershell-bitwarden/internal/adapters/cache/crypto"
+	cachefile "github.com/bnema/gtk4-layershell-bitwarden/internal/adapters/cache/file"
 	viperadapter "github.com/bnema/gtk4-layershell-bitwarden/internal/adapters/config/viper"
+	"github.com/bnema/gtk4-layershell-bitwarden/internal/adapters/gui/gtk"
+	loggeradapter "github.com/bnema/gtk4-layershell-bitwarden/internal/adapters/logging"
+	remoteadapter "github.com/bnema/gtk4-layershell-bitwarden/internal/adapters/remote/bitwarden"
+	"github.com/bnema/gtk4-layershell-bitwarden/internal/app"
 	coreconfig "github.com/bnema/gtk4-layershell-bitwarden/internal/core/config"
+	"github.com/bnema/gtk4-layershell-bitwarden/internal/ports/in"
 )
 
 // Options holds configuration for the CLI.
 type Options struct {
 	Version    string
 	ConfigPath string
+	// RunOverlay runs the application overlay. If nil, the default GTK overlay
+	// is created and started. Injecting a test double keeps tests headless.
+	RunOverlay func(context.Context, in.AppService) error
 }
 
 // NewRootCommand creates the root CLI command with all subcommands.
@@ -23,24 +36,107 @@ func NewRootCommand(opts Options) *cobra.Command {
 		Short: "Bitwarden desktop client for GTK4 layershell",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cmd.Println(fmt.Sprintf("gtk4-layershell-bitwarden %s", opts.Version))
-			// Load config to verify it can be read; tolerate missing email
-			// for first-run scenarios.
+
+			// Load config; tolerate missing email for first-run scenarios.
 			mgr := viperadapter.NewManager(opts.ConfigPath)
-			_, err := mgr.Load(cmd.Context())
+			cfg, err := mgr.Load(cmd.Context())
 			if err != nil {
 				return fmt.Errorf("config load: %w", err)
 			}
-			return nil
+
+			// Compose application service.
+			svc, err := composeService(cmd.Context(), cfg)
+			if err != nil {
+				return fmt.Errorf("compose service: %w", err)
+			}
+
+			// Start config hot-reload watcher.
+			go func() {
+				_ = mgr.Watch(cmd.Context(), func(newCfg *coreconfig.Config) {
+					if uerr := svc.UpdateConfig(context.Background(), newCfg); uerr != nil {
+						// Log via redacting logger; do not panic on invalid reload.
+						_ = uerr // ignored to avoid noise if no logger available
+					}
+				})
+			}()
+
+			// Run the overlay (default or injected).
+			runner := opts.RunOverlay
+			if runner == nil {
+				runner = func(ctx context.Context, svc in.AppService) error {
+					overlay := gtk.NewOverlay(svc, gtk.Options{Version: opts.Version})
+					return overlay.Run(ctx)
+				}
+			}
+
+			return runner(cmd.Context(), svc)
 		},
 	}
 
+	// Derive default cache/outbox paths for subcommands.
+	cachePath, outboxPath := defaultCachePaths()
+
 	root.AddCommand(newConfigCmd(opts))
-	root.AddCommand(newCacheCmd())
-	root.AddCommand(newLogoutCmd())
+	root.AddCommand(newCacheCmd(cachePath, outboxPath))
+	root.AddCommand(newLogoutCmd(cachePath, outboxPath))
 	root.AddCommand(newSyncCmd())
 
 	return root
 }
+
+// ---------------------------------------------------------------------------
+// Composition
+// ---------------------------------------------------------------------------
+
+// composeService builds all application dependencies and returns the service.
+func composeService(ctx context.Context, cfg *coreconfig.Config) (in.AppService, error) {
+	// Logger: discard by default (nil → io.Discard).
+	logger := loggeradapter.New(nil)
+
+	// Secret box for cache/outbox encryption.
+	box := cryptobox.NewBox()
+
+	// File-backed cache and outbox stores.
+	cachePath, outboxPath := defaultCachePaths()
+	cacheStore := cachefile.NewStore(cachePath)
+	outboxStore := cachefile.NewOutboxStore(outboxPath, box)
+
+	// Bitwarden remote adapter.
+	remote, err := remoteadapter.NewClient(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("remote client: %w", err)
+	}
+
+	// Application service.
+	svc := app.NewService(app.Deps{
+		Remote:    remote,
+		Cache:     cacheStore,
+		Outbox:    outboxStore,
+		SecretBox: box,
+		Logger:    logger,
+		Config:    cfg,
+		// Clock can be nil; service falls back to time.Now.
+	})
+
+	return svc, nil
+}
+
+// defaultCachePaths returns the default file paths for cache and outbox.
+// Uses os.UserCacheDir with a fallback to os.TempDir.
+func defaultCachePaths() (cachePath, outboxPath string) {
+	base := ""
+	if dir, err := os.UserCacheDir(); err == nil {
+		base = dir
+	} else {
+		base = os.TempDir()
+	}
+	appDir := filepath.Join(base, "gtk4-layershell-bitwarden")
+	return filepath.Join(appDir, "cache.json"), filepath.Join(appDir, "outbox.json")
+}
+
+// ---------------------------------------------------------------------------
+// Config subcommand
+// ---------------------------------------------------------------------------
 
 // newConfigCmd creates the "config" subcommand and its children.
 func newConfigCmd(opts Options) *cobra.Command {
@@ -117,8 +213,12 @@ func newConfigCmd(opts Options) *cobra.Command {
 	return cmd
 }
 
+// ---------------------------------------------------------------------------
+// Cache subcommand
+// ---------------------------------------------------------------------------
+
 // newCacheCmd creates the "cache" command with a "clear" subcommand.
-func newCacheCmd() *cobra.Command {
+func newCacheCmd(cachePath, outboxPath string) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "cache",
 		Short: "Manage cache",
@@ -129,7 +229,17 @@ func newCacheCmd() *cobra.Command {
 		Short: "Clear the cache",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cmd.Println("cache clear not wired yet")
+			box := cryptobox.NewBox()
+			cacheStore := cachefile.NewStore(cachePath)
+			outboxStore := cachefile.NewOutboxStore(outboxPath, box)
+
+			if err := cacheStore.Clear(cmd.Context()); err != nil {
+				return fmt.Errorf("cache clear: %w", err)
+			}
+			if err := outboxStore.Clear(cmd.Context()); err != nil {
+				return fmt.Errorf("outbox clear: %w", err)
+			}
+			cmd.Println("cache cleared")
 			return nil
 		},
 	})
@@ -137,18 +247,36 @@ func newCacheCmd() *cobra.Command {
 	return cmd
 }
 
+// ---------------------------------------------------------------------------
+// Logout subcommand
+// ---------------------------------------------------------------------------
+
 // newLogoutCmd creates the "logout" subcommand.
-func newLogoutCmd() *cobra.Command {
+func newLogoutCmd(cachePath, outboxPath string) *cobra.Command {
 	return &cobra.Command{
 		Use:   "logout",
 		Short: "Log out of Bitwarden",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cmd.Println("logout not wired yet")
+			box := cryptobox.NewBox()
+			cacheStore := cachefile.NewStore(cachePath)
+			outboxStore := cachefile.NewOutboxStore(outboxPath, box)
+
+			if err := cacheStore.Clear(cmd.Context()); err != nil {
+				return fmt.Errorf("cache clear: %w", err)
+			}
+			if err := outboxStore.Clear(cmd.Context()); err != nil {
+				return fmt.Errorf("outbox clear: %w", err)
+			}
+			cmd.Println("logged out")
 			return nil
 		},
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Sync subcommand
+// ---------------------------------------------------------------------------
 
 // newSyncCmd creates the "sync" subcommand with a --force flag.
 func newSyncCmd() *cobra.Command {
@@ -157,13 +285,17 @@ func newSyncCmd() *cobra.Command {
 		Short: "Sync with Bitwarden",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cmd.Println("sync not wired yet")
+			cmd.Println("sync runs automatically after unlock")
 			return nil
 		},
 	}
 	cmd.Flags().BoolP("force", "f", false, "Force a full sync")
 	return cmd
 }
+
+// ---------------------------------------------------------------------------
+// Config key helpers (unchanged)
+// ---------------------------------------------------------------------------
 
 // supportedGetKeys lists the keys that can be read via "config get".
 var supportedGetKeys = map[string]bool{

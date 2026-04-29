@@ -13,6 +13,7 @@ import (
 
 	"github.com/bnema/gtk4-layershell-bitwarden/internal/core/auth"
 	"github.com/bnema/gtk4-layershell-bitwarden/internal/core/cache"
+	coreconfig "github.com/bnema/gtk4-layershell-bitwarden/internal/core/config"
 	coreerrors "github.com/bnema/gtk4-layershell-bitwarden/internal/core/errors"
 	coresync "github.com/bnema/gtk4-layershell-bitwarden/internal/core/sync"
 	"github.com/bnema/gtk4-layershell-bitwarden/internal/core/vault"
@@ -558,6 +559,133 @@ func TestSyncConflictMarksItem(t *testing.T) {
 	svc.mu.Unlock()
 
 	require.Equal(t, 1, conflictCount)
+}
+
+// ---------------------------------------------------------------------------
+// Config copy / UpdateConfig tests
+// ---------------------------------------------------------------------------
+
+func TestConfigReturnsCopy(t *testing.T) {
+	svc := NewService(Deps{
+		Config: &coreconfig.Config{
+			Bitwarden: coreconfig.Bitwarden{Email: "test@example.com"},
+		},
+	})
+
+	c1 := svc.Config()
+	c2 := svc.Config()
+
+	// Both should be non-nil and equal.
+	require.NotNil(t, c1)
+	require.NotNil(t, c2)
+	require.Equal(t, "test@example.com", c1.Bitwarden.Email)
+
+	// Mutating c1 must NOT affect c2 or the service.
+	c1.Bitwarden.Email = "mutated@example.com"
+	require.Equal(t, "test@example.com", c2.Bitwarden.Email)
+
+	// Re-fetching returns the original (unmutated) value.
+	c3 := svc.Config()
+	require.Equal(t, "test@example.com", c3.Bitwarden.Email)
+
+	// c1 and c2 must point to different allocations.
+	require.NotSame(t, c1, c2)
+}
+
+func TestConfigReturnsDefaultWhenNil(t *testing.T) {
+	svc := NewService(Deps{})
+	c := svc.Config()
+	require.NotNil(t, c)
+	// Should have default values.
+	require.Equal(t, coreconfig.RegionUS, c.Bitwarden.Region)
+}
+
+func TestUpdateConfigReplacesConfig(t *testing.T) {
+	svc := NewService(Deps{})
+
+	newCfg := coreconfig.Default()
+	newCfg.Bitwarden.Email = "updated@example.com"
+	newCfg.Bitwarden.Region = coreconfig.RegionEU
+	err := svc.UpdateConfig(context.Background(), newCfg)
+	require.NoError(t, err)
+
+	c := svc.Config()
+	require.Equal(t, "updated@example.com", c.Bitwarden.Email)
+	require.Equal(t, coreconfig.RegionEU, c.Bitwarden.Region)
+}
+
+func TestUpdateConfigImmutability(t *testing.T) {
+	svc := NewService(Deps{})
+
+	original := coreconfig.Default()
+	original.Bitwarden.Email = "original@example.com"
+	err := svc.UpdateConfig(context.Background(), original)
+	require.NoError(t, err)
+
+	// Mutate the original reference after update.
+	original.Bitwarden.Email = "mutated@example.com"
+
+	// The service should still have the original value.
+	c := svc.Config()
+	require.Equal(t, "original@example.com", c.Bitwarden.Email)
+}
+
+func TestUpdateConfigRespectsContextCancel(t *testing.T) {
+	svc := NewService(Deps{})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // Already cancelled.
+
+	newCfg := coreconfig.Default()
+	err := svc.UpdateConfig(ctx, newCfg)
+	require.Error(t, err)
+	require.ErrorIs(t, err, context.Canceled)
+}
+
+func TestUpdateConfigRejectsInvalidConfig(t *testing.T) {
+	svc := NewService(Deps{})
+
+	// Invalid ui_scale (5.0 is out of range) should be rejected.
+	badCfg := coreconfig.Default()
+	badCfg.Appearance.UIScale = 5.0
+	err := svc.UpdateConfig(context.Background(), badCfg)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "config update")
+}
+
+func TestUpdateConfigToleratesOnlyMissingEmail(t *testing.T) {
+	svc := NewService(Deps{})
+
+	// Only missing email, everything else valid defaults.
+	nullCfg := coreconfig.Default()
+	nullCfg.Bitwarden.Email = ""
+	err := svc.UpdateConfig(context.Background(), nullCfg)
+	require.NoError(t, err, "missing email alone should be tolerated")
+
+	// Missing email AND invalid UIScale should be rejected.
+	badCfg := coreconfig.Default()
+	badCfg.Bitwarden.Email = ""
+	badCfg.Appearance.UIScale = 5.0
+	err = svc.UpdateConfig(context.Background(), badCfg)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "config update")
+}
+
+func TestUpdateConfigEmitsEvent(t *testing.T) {
+	svc := NewService(Deps{})
+
+	err := svc.UpdateConfig(context.Background(), coreconfig.Default())
+	require.NoError(t, err)
+
+	events := consumeEvents(t, svc.events, 100*time.Millisecond)
+	found := false
+	for _, e := range events {
+		if e.Kind == SyncUpdated && e.Message == "config updated" {
+			found = true
+			break
+		}
+	}
+	require.True(t, found, "expected SyncUpdated event with 'config updated' message")
 }
 
 func TestLockCancelsSyncInstall(t *testing.T) {

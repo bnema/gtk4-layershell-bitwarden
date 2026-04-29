@@ -2,6 +2,7 @@ package cobra
 
 import (
 	"bytes"
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -9,6 +10,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/bnema/gtk4-layershell-bitwarden/internal/ports/in"
 )
 
 // executeCmd runs the root command with the given args and returns stdout/stderr.
@@ -26,11 +29,21 @@ func executeCmd(t *testing.T, opts Options, args []string) (string, error) {
 func TestRootCommandPrintsVersion(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.toml")
-	opts := Options{Version: "v0.1.0-test", ConfigPath: path}
+
+	called := false
+	opts := Options{
+		Version:    "v0.1.0-test",
+		ConfigPath: path,
+		RunOverlay: func(_ context.Context, _ in.AppService) error {
+			called = true
+			return nil
+		},
+	}
 
 	out, err := executeCmd(t, opts, []string{})
 	require.NoError(t, err)
 	assert.Contains(t, out, "gtk4-layershell-bitwarden v0.1.0-test")
+	assert.True(t, called, "RunOverlay should have been called")
 }
 
 func TestRootCommandFailsOnInvalidConfig(t *testing.T) {
@@ -51,6 +64,31 @@ ui_scale = 5.0
 	require.Error(t, err)
 	// Root command wraps with "config load:" which comes from Load's error
 	assert.Contains(t, err.Error(), "config load")
+}
+
+func TestRootCommandRunOverlayNotCalledOnInvalidConfig(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+
+	invalidCfg := `[appearance]
+ui_scale = 5.0
+`
+	err := os.WriteFile(path, []byte(invalidCfg), 0600)
+	require.NoError(t, err)
+
+	called := false
+	opts := Options{
+		Version:    "v0.1.0",
+		ConfigPath: path,
+		RunOverlay: func(_ context.Context, _ in.AppService) error {
+			called = true
+			return nil
+		},
+	}
+
+	_, err = executeCmd(t, opts, []string{})
+	require.Error(t, err)
+	assert.False(t, called, "RunOverlay should NOT be called on invalid config")
 }
 
 func TestConfigPathPrintsTempPath(t *testing.T) {
@@ -152,54 +190,82 @@ func TestConfigGetInvalidKey(t *testing.T) {
 	assert.Contains(t, err.Error(), "unsupported config key")
 }
 
-func TestCacheClearPrintsNotWired(t *testing.T) {
+func TestCacheClearRemovesCacheFiles(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "config.toml")
-	opts := Options{ConfigPath: path}
 
-	out, err := executeCmd(t, opts, []string{"cache", "clear"})
+	// Create dummy cache and outbox files.
+	cachePath := filepath.Join(dir, "cache.json")
+	outboxPath := filepath.Join(dir, "outbox.json")
+	require.NoError(t, os.WriteFile(cachePath, []byte("{}"), 0600))
+	require.NoError(t, os.WriteFile(outboxPath, []byte("{}"), 0600))
+
+	// The newCacheCmd is tested directly since RootCommand with config
+	// compose would try to create a remote client.
+	cmd := newCacheCmd(cachePath, outboxPath)
+	cmd.SetArgs([]string{"clear"})
+	buf := new(bytes.Buffer)
+	cmd.SetOut(buf)
+	err := cmd.Execute()
 	require.NoError(t, err)
-	assert.Contains(t, out, "cache clear not wired yet")
+
+	assert.Contains(t, buf.String(), "cache cleared")
+
+	// Files should be removed.
+	require.NoFileExists(t, cachePath)
+	require.NoFileExists(t, outboxPath)
 }
 
-func TestLogoutPrintsNotWired(t *testing.T) {
+func TestLogoutPrintsLoggedOut(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "config.toml")
-	opts := Options{ConfigPath: path}
+	cachePath := filepath.Join(dir, "cache.json")
+	outboxPath := filepath.Join(dir, "outbox.json")
 
-	out, err := executeCmd(t, opts, []string{"logout"})
+	cmd := newLogoutCmd(cachePath, outboxPath)
+	buf := new(bytes.Buffer)
+	cmd.SetOut(buf)
+	err := cmd.Execute()
 	require.NoError(t, err)
-	assert.Contains(t, out, "logout not wired yet")
+	assert.Contains(t, buf.String(), "logged out")
 }
 
-func TestSyncPrintsNotWired(t *testing.T) {
+func TestSyncPrintsMessage(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.toml")
 	opts := Options{ConfigPath: path}
 
 	out, err := executeCmd(t, opts, []string{"sync"})
 	require.NoError(t, err)
-	assert.Contains(t, out, "sync not wired yet")
+	assert.Contains(t, out, "sync runs automatically after unlock")
 }
 
-func TestSyncWithForcePrintsNotWired(t *testing.T) {
+func TestSyncWithForcePrintsMessage(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.toml")
 	opts := Options{ConfigPath: path}
 
 	out, err := executeCmd(t, opts, []string{"sync", "--force"})
 	require.NoError(t, err)
-	assert.Contains(t, out, "sync not wired yet")
+	assert.Contains(t, out, "sync runs automatically after unlock")
 }
 
 func TestRootCommandHandlesMissingConfigFile(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "nonexistent", "config.toml")
-	opts := Options{Version: "v0.1.0", ConfigPath: path}
+
+	called := false
+	opts := Options{
+		Version:    "v0.1.0",
+		ConfigPath: path,
+		RunOverlay: func(_ context.Context, _ in.AppService) error {
+			called = true
+			return nil
+		},
+	}
 
 	out, err := executeCmd(t, opts, []string{})
 	require.NoError(t, err)
 	assert.Contains(t, out, "gtk4-layershell-bitwarden v0.1.0")
+	assert.True(t, called, "RunOverlay should have been called with default config")
 }
 
 func TestValidateFileNotFoundThenSetAndValidate(t *testing.T) {
