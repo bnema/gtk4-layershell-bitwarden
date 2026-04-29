@@ -106,7 +106,8 @@ func (idx *SearchIndex) indexItem(i int, item Item) {
 	if item.SecureNote != nil && item.SecureNote.Text != "" {
 		idx.keywords = append(idx.keywords, keywordEntry{itemIndex: i, keyword: item.SecureNote.Text, boost: 5})
 	}
-	// Card — index all except Code
+	// Card — index identifying metadata only. Number and Code are intentionally
+	// NOT indexed because they are sensitive payment fields.
 	if item.Card != nil {
 		if item.Card.CardholderName != "" {
 			idx.keywords = append(idx.keywords, keywordEntry{itemIndex: i, keyword: item.Card.CardholderName, boost: 5})
@@ -114,18 +115,15 @@ func (idx *SearchIndex) indexItem(i int, item Item) {
 		if item.Card.Brand != "" {
 			idx.keywords = append(idx.keywords, keywordEntry{itemIndex: i, keyword: item.Card.Brand, boost: 5})
 		}
-		if item.Card.Number != "" {
-			idx.keywords = append(idx.keywords, keywordEntry{itemIndex: i, keyword: item.Card.Number, boost: 5})
-		}
 		if item.Card.ExpMonth != "" {
 			idx.keywords = append(idx.keywords, keywordEntry{itemIndex: i, keyword: item.Card.ExpMonth, boost: 5})
 		}
 		if item.Card.ExpYear != "" {
 			idx.keywords = append(idx.keywords, keywordEntry{itemIndex: i, keyword: item.Card.ExpYear, boost: 5})
 		}
-		// Code is intentionally NOT indexed.
 	}
-	// Identity — all string fields
+	// Identity — index non-secret identifying fields only. Government IDs are
+	// intentionally NOT indexed.
 	if item.Identity != nil {
 		identityKeywords := []string{
 			item.Identity.Title, item.Identity.FirstName, item.Identity.MiddleName,
@@ -133,7 +131,6 @@ func (idx *SearchIndex) indexItem(i int, item Item) {
 			item.Identity.Address2, item.Identity.Address3, item.Identity.City,
 			item.Identity.State, item.Identity.PostalCode, item.Identity.Country,
 			item.Identity.Company, item.Identity.Email, item.Identity.Phone,
-			item.Identity.SSN, item.Identity.PassportNumber, item.Identity.LicenseNumber,
 			item.Identity.Username,
 		}
 		for _, kw := range identityKeywords {

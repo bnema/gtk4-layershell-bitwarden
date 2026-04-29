@@ -84,7 +84,7 @@ func TestSearchDoesNotIndexPasswordsOrTOTP(t *testing.T) {
 	require.Len(t, results, 1, "username should still be searchable")
 }
 
-func TestSearchDoesNotIndexCardCodeOrHiddenFields(t *testing.T) {
+func TestSearchDoesNotIndexCardNumberCodeOrHiddenFields(t *testing.T) {
 	items := []Item{
 		{
 			ID:           "1",
@@ -106,8 +106,12 @@ func TestSearchDoesNotIndexCardCodeOrHiddenFields(t *testing.T) {
 
 	idx := BuildIndex(items)
 
+	// Card.Number must not be indexed.
+	results := idx.Search("4111111111111111", 10)
+	require.Empty(t, results, "card number must not be indexed")
+
 	// Card.Code must not be indexed.
-	results := idx.Search("123", 10)
+	results = idx.Search("123", 10)
 	require.Empty(t, results, "card code must not be indexed")
 
 	// Hidden field value must not be indexed.
@@ -122,7 +126,26 @@ func TestSearchDoesNotIndexCardCodeOrHiddenFields(t *testing.T) {
 	results = idx.Search("Alice", 10)
 	require.Len(t, results, 1, "cardholder name should be searchable")
 
-	// Card number should be searchable.
-	results = idx.Search("4111111111111111", 10)
-	require.Len(t, results, 1, "card number should be searchable")
+}
+
+func TestSearchDoesNotIndexIdentityGovernmentIDs(t *testing.T) {
+	items := []Item{
+		{
+			ID:   "1",
+			Name: "Identity",
+			Type: ItemTypeIdentity,
+			Identity: &Identity{
+				FirstName:      "Alice",
+				SSN:            "999-99-9999",
+				PassportNumber: "P123456789",
+				LicenseNumber:  "D1234567",
+			},
+		},
+	}
+
+	idx := BuildIndex(items)
+	require.Empty(t, idx.Search("999-99-9999", 10), "SSN must not be indexed")
+	require.Empty(t, idx.Search("P123456789", 10), "passport number must not be indexed")
+	require.Empty(t, idx.Search("D1234567", 10), "license number must not be indexed")
+	require.Len(t, idx.Search("Alice", 10), 1, "non-secret identity name should be searchable")
 }

@@ -119,6 +119,25 @@ func TestRejectInvalidPrimaryAction(t *testing.T) {
 	}
 }
 
+func TestValidateAllDoesNotDuplicateErrors(t *testing.T) {
+	cfg := Default()
+	errs := ValidateAll(cfg)
+	if len(errs) != 1 {
+		t.Fatalf("expected exactly one error, got %d: %v", len(errs), errs)
+	}
+	if errs[0] != ErrEmailRequired {
+		t.Fatalf("expected ErrEmailRequired, got %v", errs[0])
+	}
+}
+
+func TestValidateReturnsFirstValidateAllError(t *testing.T) {
+	cfg := Default()
+	cfg.Appearance.UIScale = 4
+	if err := Validate(cfg); err != ErrEmailRequired {
+		t.Fatalf("expected first error ErrEmailRequired, got %v", err)
+	}
+}
+
 func TestDefaultValues(t *testing.T) {
 	cfg := Default()
 

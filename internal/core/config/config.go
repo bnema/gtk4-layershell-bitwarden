@@ -119,48 +119,16 @@ func Default() *Config {
 }
 
 func Validate(cfg *Config) error {
-	if cfg.Bitwarden.Email == "" {
-		return ErrEmailRequired
+	errs := ValidateAll(cfg)
+	if len(errs) == 0 {
+		return nil
 	}
-
-	switch cfg.Bitwarden.Region {
-	case RegionUS, RegionEU, RegionSelfHosted:
-		// valid
-	default:
-		return ErrInvalidRegion
-	}
-
-	if cfg.Bitwarden.Region == RegionSelfHosted {
-		if cfg.Bitwarden.ServerURL == "" {
-			return ErrInvalidServerURL
-		}
-		u, err := url.Parse(cfg.Bitwarden.ServerURL)
-		if err != nil || u.Scheme != "https" || !strings.HasPrefix(cfg.Bitwarden.ServerURL, "https://") {
-			return ErrInvalidServerURL
-		}
-	}
-
-	if cfg.Appearance.UIScale < 0.5 || cfg.Appearance.UIScale > 3.0 {
-		return ErrInvalidUIScale
-	}
-
-	switch cfg.Actions.DefaultPrimaryAction {
-	case ActionCopyPassword, ActionCopyUsername, ActionOpenURL, ActionOpenDetail:
-		// valid
-	default:
-		return ErrInvalidPrimaryAction
-	}
-
-	return nil
+	return errs[0]
 }
 
 // ValidateAll returns a slice of all validation errors found.
 func ValidateAll(cfg *Config) []error {
 	var errs []error
-	if err := Validate(cfg); err != nil {
-		errs = append(errs, err)
-	}
-
 	if cfg.Bitwarden.Email == "" {
 		errs = append(errs, ErrEmailRequired)
 	}
