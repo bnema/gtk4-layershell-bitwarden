@@ -236,25 +236,37 @@ func (m *Manager) Save(ctx context.Context, cfg *coreconfig.Config) error {
 		return fmt.Errorf("marshal config: %w", err)
 	}
 
-	// Atomic write: temp file + rename
-	tmpPath := m.path + ".tmp"
-	f, err := os.OpenFile(tmpPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
+	// Atomic write: unique temp file in same directory + rename. The Manager
+	// mutex serializes one instance, and unique temp names also avoid conflicts
+	// across independent Manager instances pointed at the same config path.
+	f, err := os.CreateTemp(dir, "."+filepath.Base(m.path)+"-*.tmp")
 	if err != nil {
 		return fmt.Errorf("create temp file: %w", err)
 	}
+	tmpPath := f.Name()
+	if err := f.Chmod(0600); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("chmod temp file: %w", err)
+	}
+	closeOnError := true
+	defer func() {
+		if closeOnError {
+			_ = f.Close()
+		}
+	}()
 
 	if _, err := f.Write(data); err != nil {
-		_ = f.Close()
 		_ = os.Remove(tmpPath)
 		return fmt.Errorf("write temp file: %w", err)
 	}
 
 	if err := f.Sync(); err != nil {
-		_ = f.Close()
 		_ = os.Remove(tmpPath)
 		return fmt.Errorf("fsync temp file: %w", err)
 	}
 
+	closeOnError = false
 	if err := f.Close(); err != nil {
 		_ = os.Remove(tmpPath)
 		return fmt.Errorf("close temp file: %w", err)
