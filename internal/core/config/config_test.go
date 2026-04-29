@@ -86,6 +86,18 @@ func TestRejectBadSelfHostedURL(t *testing.T) {
 	if err := Validate(cfg); err != ErrInvalidServerURL {
 		t.Errorf("expected ErrInvalidServerURL for relative URL, got %v", err)
 	}
+
+	// Hostless HTTPS URL
+	cfg.Bitwarden.ServerURL = "https://"
+	if err := Validate(cfg); err != ErrInvalidServerURL {
+		t.Errorf("expected ErrInvalidServerURL for hostless URL, got %v", err)
+	}
+
+	// URL with query must be rejected
+	cfg.Bitwarden.ServerURL = "https://vault.example.com?token=leaky"
+	if err := Validate(cfg); err != ErrInvalidServerURL {
+		t.Errorf("expected ErrInvalidServerURL for query URL, got %v", err)
+	}
 }
 
 func TestAcceptSelfHostedURL(t *testing.T) {

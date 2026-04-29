@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
-	"strings"
 	"time"
 )
 
@@ -144,7 +143,7 @@ func ValidateAll(cfg *Config) []error {
 			errs = append(errs, ErrInvalidServerURL)
 		} else {
 			u, err := url.Parse(cfg.Bitwarden.ServerURL)
-			if err != nil || u.Scheme != "https" || !strings.HasPrefix(cfg.Bitwarden.ServerURL, "https://") {
+			if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
 				errs = append(errs, ErrInvalidServerURL)
 			}
 		}

@@ -1,6 +1,7 @@
 package vault
 
 import (
+	"sort"
 	"strings"
 	"unicode"
 )
@@ -61,18 +62,20 @@ func (idx *SearchIndex) Search(query string, limit int) []ScoredItem {
 		}
 	}
 
-	// Convert to sorted slice (stable sort by score descending).
+	// Convert to a sorted slice. Tie-break on name and ID for deterministic UI.
 	results := make([]ScoredItem, 0, len(scores))
 	for itemIdx := range scores {
 		results = append(results, ScoredItem{Item: idx.items[itemIdx], Score: scores[itemIdx]})
 	}
-
-	// Simple insertion sort (small n).
-	for i := 1; i < len(results); i++ {
-		for j := i; j > 0 && results[j].Score > results[j-1].Score; j-- {
-			results[j], results[j-1] = results[j-1], results[j]
+	sort.SliceStable(results, func(i, j int) bool {
+		if results[i].Score != results[j].Score {
+			return results[i].Score > results[j].Score
 		}
-	}
+		if results[i].Item.Name != results[j].Item.Name {
+			return results[i].Item.Name < results[j].Item.Name
+		}
+		return results[i].Item.ID < results[j].Item.ID
+	})
 
 	if len(results) > limit {
 		results = results[:limit]
