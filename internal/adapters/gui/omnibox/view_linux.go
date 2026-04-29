@@ -11,6 +11,7 @@ import (
 	"github.com/bnema/puregotk/v4/gdk"
 	gtklib "github.com/bnema/puregotk/v4/gtk"
 
+	"github.com/bnema/gtk4-layershell-bitwarden/internal/core/vault"
 	"github.com/bnema/gtk4-layershell-bitwarden/internal/ports/in"
 )
 
@@ -37,7 +38,10 @@ type View struct {
 	statusLabel   *gtklib.Label
 	statusBox     *gtklib.Box
 
-	mu sync.Mutex
+	mu          sync.Mutex
+	currentItem vault.Item
+	searchTimer *time.Timer
+	searchLock  sync.Mutex
 }
 
 // New creates a new View, builds all GTK widgets, and starts the event listener.
@@ -147,20 +151,6 @@ func (v *View) buildUI() {
 
 	// --- Form view (initially hidden) ---
 	v.formBox = gtklib.NewBox(gtklib.OrientationVerticalValue, 4)
-	formStatusText := "Edit form not wired yet"
-	formStatusLabel := gtklib.NewLabel(&formStatusText)
-	v.formBox.Append(&formStatusLabel.Widget)
-	formBackBtn := gtklib.NewButtonWithLabel("← Back")
-	formBackClickedCb := func(_ gtklib.Button) {
-		v.mu.Lock()
-		v.state.Back()
-		v.mu.Unlock()
-		idleAddOnce(func() { v.render() })
-	}
-	v.retain(formBackClickedCb)
-	formBackBtn.ConnectClicked(&formBackClickedCb)
-	v.formBox.Append(&formBackBtn.Widget)
-
 	v.Root.Append(&v.formBox.Widget)
 }
 
@@ -217,10 +207,24 @@ func (v *View) AttachKeyController(window *gtklib.Window) {
 			case gdk.KEY_Return, gdk.KEY_KP_Enter:
 				if mod&gdk.ControlMaskValue != 0 {
 					v.state.OpenDetail()
+					detailID := v.state.DetailID
+					v.loadDetail(detailID)
 					idleAddOnce(func() { v.render() })
 					return true
 				}
 				return false
+			case gdk.KEY_n:
+				if mod&gdk.ControlMaskValue != 0 {
+					v.mu.Lock()
+					v.currentItem = vault.Item{Type: vault.ItemTypeLogin}
+					v.state.Mode = ModeForm
+					v.mu.Unlock()
+					idleAddOnce(func() {
+						v.renderForm(v.currentItem)
+						v.render()
+					})
+					return true
+				}
 			case gdk.KEY_Escape:
 				idleAddOnce(v.quit)
 				return true
@@ -337,18 +341,13 @@ func (v *View) loadAllItems() {
 	}()
 }
 
-// searchLock serialises concurrent searches.
-var searchLock sync.Mutex
-
-// searchTimer is the debounce timer for search input.
-var searchTimer *time.Timer
-
 // debounceSearch cancels any pending search and schedules a new one.
 func (v *View) debounceSearch() {
-	if searchTimer != nil {
-		searchTimer.Stop()
+	v.mu.Lock()
+	if v.searchTimer != nil {
+		v.searchTimer.Stop()
 	}
-	searchTimer = time.AfterFunc(150*time.Millisecond, func() {
+	v.searchTimer = time.AfterFunc(150*time.Millisecond, func() {
 		query := ""
 		idleAddOnce(func() {
 			v.mu.Lock()
@@ -361,15 +360,16 @@ func (v *View) debounceSearch() {
 		}
 		v.doSearch(query)
 	})
+	v.mu.Unlock()
 }
 
 // doSearch runs a search query.
 func (v *View) doSearch(query string) {
-	if !searchLock.TryLock() {
+	if !v.searchLock.TryLock() {
 		return
 	}
 	go func() {
-		defer searchLock.Unlock()
+		defer v.searchLock.Unlock()
 		results, err := v.service.Search(context.Background(), query, 50)
 		if err != nil {
 			return
@@ -429,6 +429,9 @@ func (v *View) loadDetail(id string) {
 			})
 			return
 		}
+		v.mu.Lock()
+		v.currentItem = item
+		v.mu.Unlock()
 		detail := DetailFromItem(item)
 		idleAddOnce(func() {
 			v.renderDetail(detail)
@@ -623,6 +626,21 @@ func (v *View) renderDetail(detail Detail) {
 		v.detailBox.Append(&dLabel.Widget)
 	}
 
+	// Edit button
+	editBtn := gtklib.NewButtonWithLabel("Edit")
+	editCb := func(_ gtklib.Button) {
+		v.mu.Lock()
+		v.state.Mode = ModeForm
+		v.mu.Unlock()
+		idleAddOnce(func() {
+			v.renderForm(v.currentItem)
+			v.render()
+		})
+	}
+	v.retain(editCb)
+	editBtn.ConnectClicked(&editCb)
+	v.detailBox.Append(&editBtn.Widget)
+
 	// Trash/Restore/Delete buttons
 	if !detail.Deleted {
 		trashBtn := gtklib.NewButtonWithLabel("Trash")
@@ -684,6 +702,282 @@ func (v *View) renderDetail(detail Detail) {
 	}
 
 	v.detailBox.SetVisible(true)
+}
+
+// renderForm populates the form box with editable entries for the given item.
+func (v *View) renderForm(item vault.Item) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+
+	// Clear existing children.
+	for {
+		child := v.formBox.GetFirstChild()
+		if child == nil || child.Ptr == 0 {
+			break
+		}
+		v.formBox.Remove(child)
+	}
+
+	editable := EditableFromItem(item)
+
+	// Back button
+	backBtn := gtklib.NewButtonWithLabel("← Back")
+	backClickedCb := func(_ gtklib.Button) {
+		v.mu.Lock()
+		v.state.Back()
+		v.mu.Unlock()
+		idleAddOnce(func() { v.render() })
+	}
+	v.retain(backClickedCb)
+	backBtn.ConnectClicked(&backClickedCb)
+	v.formBox.Append(&backBtn.Widget)
+
+	// Scrollable content area
+	scrollWin := gtklib.NewScrolledWindow()
+	scrollWin.SetVexpand(true)
+	formContent := gtklib.NewBox(gtklib.OrientationVerticalValue, 4)
+	scrollWin.SetChild(&formContent.Widget)
+	v.formBox.Append(&scrollWin.Widget)
+
+	// Common: Name entry
+	nameText := "Name"
+	nameLabel := gtklib.NewLabel(&nameText)
+	formContent.Append(&nameLabel.Widget)
+	nameEntry := gtklib.NewEntry()
+	nameEntry.SetText(editable.Name)
+	formContent.Append(&nameEntry.Widget)
+
+	// Declare all type-specific entry pointers.
+	var usernameEntry, uriEntry, pwEntry, totpEntry *gtklib.Entry
+	var chEntry, brandEntry, numEntry, expMEntry, expYEntry, codeEntry *gtklib.Entry
+	var fnEntry, lnEntry, emailEntry, phoneEntry, idUserEntry *gtklib.Entry
+	var ssnEntry, passportEntry, licenseEntry *gtklib.Entry
+
+	switch item.Type {
+	case vault.ItemTypeLogin:
+		uText := "Username"
+		usernameLabel := gtklib.NewLabel(&uText)
+		formContent.Append(&usernameLabel.Widget)
+		usernameEntry = gtklib.NewEntry()
+		usernameEntry.SetText(editable.Username)
+		formContent.Append(&usernameEntry.Widget)
+
+		uriText := "URI"
+		uriLabel := gtklib.NewLabel(&uriText)
+		formContent.Append(&uriLabel.Widget)
+		uriEntry = gtklib.NewEntry()
+		uriEntry.SetText(editable.URI)
+		formContent.Append(&uriEntry.Widget)
+
+		pwText := "Password"
+		pwLabel := gtklib.NewLabel(&pwText)
+		formContent.Append(&pwLabel.Widget)
+		pwEntry = gtklib.NewEntry()
+		pwEntry.SetText(editable.Password)
+		pwEntry.SetVisibility(false)
+		formContent.Append(&pwEntry.Widget)
+
+		totpText := "TOTP"
+		totpLabel := gtklib.NewLabel(&totpText)
+		formContent.Append(&totpLabel.Widget)
+		totpEntry = gtklib.NewEntry()
+		totpEntry.SetText(editable.TOTP)
+		totpEntry.SetVisibility(false)
+		formContent.Append(&totpEntry.Widget)
+
+	case vault.ItemTypeSecureNote:
+		// No additional fields beyond Name and Notes.
+
+	case vault.ItemTypeCard:
+		chText := "Cardholder name"
+		chLabel := gtklib.NewLabel(&chText)
+		formContent.Append(&chLabel.Widget)
+		chEntry = gtklib.NewEntry()
+		chEntry.SetText(editable.CardholderName)
+		formContent.Append(&chEntry.Widget)
+
+		brandText := "Brand"
+		brandLabel := gtklib.NewLabel(&brandText)
+		formContent.Append(&brandLabel.Widget)
+		brandEntry = gtklib.NewEntry()
+		brandEntry.SetText(editable.CardBrand)
+		formContent.Append(&brandEntry.Widget)
+
+		numText := "Number"
+		numLabel := gtklib.NewLabel(&numText)
+		formContent.Append(&numLabel.Widget)
+		numEntry = gtklib.NewEntry()
+		numEntry.SetText(editable.CardNumber)
+		numEntry.SetVisibility(false)
+		formContent.Append(&numEntry.Widget)
+
+		expMText := "Exp month"
+		expMLabel := gtklib.NewLabel(&expMText)
+		formContent.Append(&expMLabel.Widget)
+		expMEntry = gtklib.NewEntry()
+		expMEntry.SetText(editable.CardExpMonth)
+		formContent.Append(&expMEntry.Widget)
+
+		expYText := "Exp year"
+		expYLabel := gtklib.NewLabel(&expYText)
+		formContent.Append(&expYLabel.Widget)
+		expYEntry = gtklib.NewEntry()
+		expYEntry.SetText(editable.CardExpYear)
+		formContent.Append(&expYEntry.Widget)
+
+		codeText := "Code"
+		codeLabel := gtklib.NewLabel(&codeText)
+		formContent.Append(&codeLabel.Widget)
+		codeEntry = gtklib.NewEntry()
+		codeEntry.SetText(editable.CardCode)
+		codeEntry.SetVisibility(false)
+		formContent.Append(&codeEntry.Widget)
+
+	case vault.ItemTypeIdentity:
+		fnText := "First name"
+		fnLabel := gtklib.NewLabel(&fnText)
+		formContent.Append(&fnLabel.Widget)
+		fnEntry = gtklib.NewEntry()
+		fnEntry.SetText(editable.IdentityFirstName)
+		formContent.Append(&fnEntry.Widget)
+
+		lnText := "Last name"
+		lnLabel := gtklib.NewLabel(&lnText)
+		formContent.Append(&lnLabel.Widget)
+		lnEntry = gtklib.NewEntry()
+		lnEntry.SetText(editable.IdentityLastName)
+		formContent.Append(&lnEntry.Widget)
+
+		emailText := "Email"
+		emailLabel := gtklib.NewLabel(&emailText)
+		formContent.Append(&emailLabel.Widget)
+		emailEntry = gtklib.NewEntry()
+		emailEntry.SetText(editable.IdentityEmail)
+		formContent.Append(&emailEntry.Widget)
+
+		phoneText := "Phone"
+		phoneLabel := gtklib.NewLabel(&phoneText)
+		formContent.Append(&phoneLabel.Widget)
+		phoneEntry = gtklib.NewEntry()
+		phoneEntry.SetText(editable.IdentityPhone)
+		formContent.Append(&phoneEntry.Widget)
+
+		idUserText := "Username"
+		idUserLabel := gtklib.NewLabel(&idUserText)
+		formContent.Append(&idUserLabel.Widget)
+		idUserEntry = gtklib.NewEntry()
+		idUserEntry.SetText(editable.IdentityUsername)
+		formContent.Append(&idUserEntry.Widget)
+
+		ssnText := "SSN"
+		ssnLabel := gtklib.NewLabel(&ssnText)
+		formContent.Append(&ssnLabel.Widget)
+		ssnEntry = gtklib.NewEntry()
+		ssnEntry.SetText(editable.IdentitySSN)
+		ssnEntry.SetVisibility(false)
+		formContent.Append(&ssnEntry.Widget)
+
+		passportText := "Passport number"
+		passportLabel := gtklib.NewLabel(&passportText)
+		formContent.Append(&passportLabel.Widget)
+		passportEntry = gtklib.NewEntry()
+		passportEntry.SetText(editable.IdentityPassportNumber)
+		passportEntry.SetVisibility(false)
+		formContent.Append(&passportEntry.Widget)
+
+		licenseText := "License number"
+		licenseLabel := gtklib.NewLabel(&licenseText)
+		formContent.Append(&licenseLabel.Widget)
+		licenseEntry = gtklib.NewEntry()
+		licenseEntry.SetText(editable.IdentityLicenseNumber)
+		licenseEntry.SetVisibility(false)
+		formContent.Append(&licenseEntry.Widget)
+	}
+
+	// Notes entry (for all types)
+	notesText := "Notes"
+	notesLabel := gtklib.NewLabel(&notesText)
+	formContent.Append(&notesLabel.Widget)
+	notesEntry := gtklib.NewEntry()
+	notesEntry.SetText(editable.Notes)
+	formContent.Append(&notesEntry.Widget)
+
+	// Save button
+	saveBtn := gtklib.NewButtonWithLabel("Save")
+	saveCb := func(_ gtklib.Button) {
+		e := EditableFromItem(v.currentItem)
+		e.Name = nameEntry.GetText()
+		e.Notes = notesEntry.GetText()
+
+		switch item.Type {
+		case vault.ItemTypeLogin:
+			e.Username = usernameEntry.GetText()
+			e.URI = uriEntry.GetText()
+			e.Password = pwEntry.GetText()
+			e.TOTP = totpEntry.GetText()
+		case vault.ItemTypeSecureNote:
+			// Name and Notes already set.
+		case vault.ItemTypeCard:
+			e.CardholderName = chEntry.GetText()
+			e.CardBrand = brandEntry.GetText()
+			e.CardNumber = numEntry.GetText()
+			e.CardExpMonth = expMEntry.GetText()
+			e.CardExpYear = expYEntry.GetText()
+			e.CardCode = codeEntry.GetText()
+		case vault.ItemTypeIdentity:
+			e.IdentityFirstName = fnEntry.GetText()
+			e.IdentityLastName = lnEntry.GetText()
+			e.IdentityEmail = emailEntry.GetText()
+			e.IdentityPhone = phoneEntry.GetText()
+			e.IdentityUsername = idUserEntry.GetText()
+			e.IdentitySSN = ssnEntry.GetText()
+			e.IdentityPassportNumber = passportEntry.GetText()
+			e.IdentityLicenseNumber = licenseEntry.GetText()
+		}
+
+		if err := ValidateItem(e); err != nil {
+			v.mu.Lock()
+			v.state.Error = err.Error()
+			v.mu.Unlock()
+			idleAddOnce(func() { v.render() })
+			return
+		}
+
+		updated := e.BuildItem()
+
+		go func() {
+			var result vault.Item
+			var err error
+			if v.currentItem.ID == "" {
+				result, err = v.service.Create(context.Background(), updated)
+			} else {
+				result, err = v.service.Update(context.Background(), v.currentItem.ID, updated)
+			}
+			if err != nil {
+				idleAddOnce(func() {
+					v.mu.Lock()
+					v.state.Error = err.Error()
+					v.mu.Unlock()
+					v.render()
+				})
+				return
+			}
+			idleAddOnce(func() {
+				v.mu.Lock()
+				v.state.Error = ""
+				v.state.SetStatus(Status{})
+				v.currentItem = result
+				v.state.Mode = ModeDetail
+				v.state.DetailID = result.ID
+				v.mu.Unlock()
+				v.renderDetail(DetailFromItem(result))
+				v.render()
+			})
+		}()
+	}
+	v.retain(saveCb)
+	saveBtn.ConnectClicked(&saveCb)
+	formContent.Append(&saveBtn.Widget)
 }
 
 // renderStatus updates the status label.

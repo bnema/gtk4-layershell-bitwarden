@@ -6,19 +6,80 @@ import (
 	"github.com/bnema/gtk4-layershell-bitwarden/internal/core/vault"
 )
 
-// EditableItem holds the fields a user can edit for a vault item.
-// Only non-secret, non-identifying fields are exposed.
+// EditableItem holds all the fields a user can edit for a vault item.
+// Secret values (password, TOTP, card number, card code, SSN, passport, license)
+// are included here in the form model only and must never be logged or printed.
 type EditableItem struct {
 	Name     string
 	Type     vault.ItemType
 	Username string
 	URI      string
+	Password string
+	TOTP     string
 	Notes    string
+
+	// Card fields
+	CardholderName string
+	CardBrand      string
+	CardNumber     string
+	CardExpMonth   string
+	CardExpYear    string
+	CardCode       string
+
+	// Identity fields
+	IdentityFirstName      string
+	IdentityLastName       string
+	IdentityEmail          string
+	IdentityPhone          string
+	IdentityUsername       string
+	IdentitySSN            string
+	IdentityPassportNumber string
+	IdentityLicenseNumber  string
+}
+
+// EditableFromItem creates an EditableItem from a vault.Item, preserving
+// current values including secrets.
+func EditableFromItem(item vault.Item) EditableItem {
+	e := EditableItem{
+		Name:  item.Name,
+		Type:  item.Type,
+		Notes: item.Notes,
+	}
+	switch item.Type {
+	case vault.ItemTypeLogin:
+		if item.Login != nil {
+			e.Username = item.Login.Username
+			e.Password = item.Login.Password
+			e.TOTP = item.Login.TOTP
+			if len(item.Login.URIs) > 0 {
+				e.URI = item.Login.URIs[0].URI
+			}
+		}
+	case vault.ItemTypeCard:
+		if item.Card != nil {
+			e.CardholderName = item.Card.CardholderName
+			e.CardBrand = item.Card.Brand
+			e.CardNumber = item.Card.Number
+			e.CardExpMonth = item.Card.ExpMonth
+			e.CardExpYear = item.Card.ExpYear
+			e.CardCode = item.Card.Code
+		}
+	case vault.ItemTypeIdentity:
+		if item.Identity != nil {
+			e.IdentityFirstName = item.Identity.FirstName
+			e.IdentityLastName = item.Identity.LastName
+			e.IdentityEmail = item.Identity.Email
+			e.IdentityPhone = item.Identity.Phone
+			e.IdentityUsername = item.Identity.Username
+			e.IdentitySSN = item.Identity.SSN
+			e.IdentityPassportNumber = item.Identity.PassportNumber
+			e.IdentityLicenseNumber = item.Identity.LicenseNumber
+		}
+	}
+	return e
 }
 
 // BuildItem creates a vault.Item from the EditableItem fields.
-// Secrets (password, TOTP, card number, card code, SSN, passport, license)
-// are not part of EditableItem and remain empty in the returned Item.
 func (e EditableItem) BuildItem() vault.Item {
 	item := vault.Item{
 		Name:  e.Name,
@@ -27,18 +88,37 @@ func (e EditableItem) BuildItem() vault.Item {
 	}
 	switch e.Type {
 	case vault.ItemTypeLogin:
-		item.Login = &vault.Login{
+		login := &vault.Login{
 			Username: e.Username,
+			Password: e.Password,
+			TOTP:     e.TOTP,
 		}
 		if e.URI != "" {
-			item.Login.URIs = []vault.URI{{URI: e.URI}}
+			login.URIs = []vault.URI{{URI: e.URI}}
 		}
+		item.Login = login
 	case vault.ItemTypeSecureNote:
 		item.SecureNote = &vault.SecureNote{Text: e.Notes}
 	case vault.ItemTypeCard:
-		item.Card = &vault.Card{}
+		item.Card = &vault.Card{
+			CardholderName: e.CardholderName,
+			Brand:          e.CardBrand,
+			Number:         e.CardNumber,
+			ExpMonth:       e.CardExpMonth,
+			ExpYear:        e.CardExpYear,
+			Code:           e.CardCode,
+		}
 	case vault.ItemTypeIdentity:
-		item.Identity = &vault.Identity{}
+		item.Identity = &vault.Identity{
+			FirstName:      e.IdentityFirstName,
+			LastName:       e.IdentityLastName,
+			Email:          e.IdentityEmail,
+			Phone:          e.IdentityPhone,
+			Username:       e.IdentityUsername,
+			SSN:            e.IdentitySSN,
+			PassportNumber: e.IdentityPassportNumber,
+			LicenseNumber:  e.IdentityLicenseNumber,
+		}
 	}
 	return item
 }
