@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/bnema/puregotk/v4/gdk"
+	gobject "github.com/bnema/puregotk/v4/gobject"
 	gtklib "github.com/bnema/puregotk/v4/gtk"
 
 	"github.com/bnema/gtk4-layershell-bitwarden/internal/core/vault"
@@ -43,19 +44,32 @@ type View struct {
 	searchTimer *time.Timer
 	searchLock  sync.Mutex
 
-	dynamicCallbacks []interface{}
+	dynamicHandlers []dynamicHandler
 }
 
-// retainDynamic appends cb to dynamicCallbacks to prevent GC from collecting
-// GTK callbacks that are created dynamically (renderDetail/renderForm).
-func (v *View) retainDynamic(cb interface{}) {
-	v.dynamicCallbacks = append(v.dynamicCallbacks, cb)
+// dynamicHandler tracks a GTK signal connection that must be explicitly
+// disconnected from the puregotk/glib registry, not just dropped from a slice.
+type dynamicHandler struct {
+	obj      *gobject.Object
+	handler  uint
+	callback interface{}
 }
 
-// resetDynamicCallbacks clears the dynamic callbacks slice. Must be called
-// before rebuilding dynamic widgets so old callbacks can be GC'd.
+// retainDynamic stores the handler and its owning object so the signal can be
+// disconnected later via resetDynamicCallbacks.
+func (v *View) retainDynamic(obj *gobject.Object, handler uint, cb interface{}) {
+	v.dynamicHandlers = append(v.dynamicHandlers, dynamicHandler{obj: obj, handler: handler, callback: cb})
+}
+
+// resetDynamicCallbacks disconnects all tracked dynamic signal handlers from
+// the puregotk/glib registry and clears the slice.
 func (v *View) resetDynamicCallbacks() {
-	v.dynamicCallbacks = nil
+	for _, h := range v.dynamicHandlers {
+		if h.obj != nil && h.handler != 0 {
+			h.obj.DisconnectSignal(h.handler)
+		}
+	}
+	v.dynamicHandlers = nil
 }
 
 // New creates a new View, builds all GTK widgets, and starts the event listener.
@@ -582,8 +596,8 @@ func (v *View) renderDetail(detail Detail) {
 		v.mu.Unlock()
 		idleAddOnce(func() { v.render() })
 	}
-	v.retainDynamic(backClickedCb)
-	backBtn.ConnectClicked(&backClickedCb)
+	handler := backBtn.ConnectClicked(&backClickedCb)
+	v.retainDynamic(&backBtn.Widget.InitiallyUnowned.Object, handler, backClickedCb)
 	v.detailBox.Append(&backBtn.Widget)
 
 	// Title
@@ -687,8 +701,8 @@ func (v *View) renderDetail(detail Detail) {
 			v.render()
 		})
 	}
-	v.retainDynamic(editCb)
-	editBtn.ConnectClicked(&editCb)
+	handler0 := editBtn.ConnectClicked(&editCb)
+	v.retainDynamic(&editBtn.Widget.InitiallyUnowned.Object, handler0, editCb)
 	v.detailBox.Append(&editBtn.Widget)
 
 	// Trash/Restore/Delete buttons
@@ -708,8 +722,8 @@ func (v *View) renderDetail(detail Detail) {
 				})
 			}()
 		}
-		v.retainDynamic(trashCb)
-		trashBtn.ConnectClicked(&trashCb)
+		handler := trashBtn.ConnectClicked(&trashCb)
+		v.retainDynamic(&trashBtn.Widget.InitiallyUnowned.Object, handler, trashCb)
 		v.detailBox.Append(&trashBtn.Widget)
 	} else {
 		restoreBtn := gtklib.NewButtonWithLabel("Restore")
@@ -727,8 +741,8 @@ func (v *View) renderDetail(detail Detail) {
 				})
 			}()
 		}
-		v.retainDynamic(restoreCb)
-		restoreBtn.ConnectClicked(&restoreCb)
+		handler := restoreBtn.ConnectClicked(&restoreCb)
+		v.retainDynamic(&restoreBtn.Widget.InitiallyUnowned.Object, handler, restoreCb)
 		v.detailBox.Append(&restoreBtn.Widget)
 
 		deleteBtn := gtklib.NewButtonWithLabel("Delete permanently")
@@ -746,8 +760,8 @@ func (v *View) renderDetail(detail Detail) {
 				})
 			}()
 		}
-		v.retainDynamic(deleteCb)
-		deleteBtn.ConnectClicked(&deleteCb)
+		handler = deleteBtn.ConnectClicked(&deleteCb)
+		v.retainDynamic(&deleteBtn.Widget.InitiallyUnowned.Object, handler, deleteCb)
 		v.detailBox.Append(&deleteBtn.Widget)
 	}
 
@@ -779,8 +793,8 @@ func (v *View) renderForm(item vault.Item) {
 		v.mu.Unlock()
 		idleAddOnce(func() { v.render() })
 	}
-	v.retainDynamic(backClickedCb)
-	backBtn.ConnectClicked(&backClickedCb)
+	handler := backBtn.ConnectClicked(&backClickedCb)
+	v.retainDynamic(&backBtn.Widget.InitiallyUnowned.Object, handler, backClickedCb)
 	v.formBox.Append(&backBtn.Widget)
 
 	// Scrollable content area
@@ -1030,8 +1044,8 @@ func (v *View) renderForm(item vault.Item) {
 			})
 		}()
 	}
-	v.retainDynamic(saveCb)
-	saveBtn.ConnectClicked(&saveCb)
+	handler1 := saveBtn.ConnectClicked(&saveCb)
+	v.retainDynamic(&saveBtn.Widget.InitiallyUnowned.Object, handler1, saveCb)
 	formContent.Append(&saveBtn.Widget)
 }
 
