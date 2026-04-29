@@ -50,6 +50,8 @@ func (e *Error) Is(target error) bool {
 }
 
 var (
-	ErrLocked   = &Error{Kind: KindLocked}
-	ErrConflict = &Error{Kind: KindConflict}
+	ErrLocked      = &Error{Kind: KindLocked}
+	ErrConflict    = &Error{Kind: KindConflict}
+	ErrNotFound    = &Error{Kind: KindNotFound}
+	ErrUnsupported = &Error{Kind: KindUnsupported}
 )
