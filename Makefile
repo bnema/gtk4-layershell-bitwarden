@@ -1,4 +1,10 @@
-.PHONY: test race lint safety check
+APP := gtk4-layershell-bitwarden
+CMD := ./cmd/$(APP)
+DIST_DIR := dist
+VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+LDFLAGS := -s -w -X main.version=$(VERSION)
+
+.PHONY: test race lint safety check install build
 
 test:
 	go test ./...
@@ -25,5 +31,14 @@ safety:
 		echo "unexpected directory creation outside cache/config adapters"; \
 		exit 1; \
 	fi
+
+install:
+	go install -ldflags "$(LDFLAGS)" $(CMD)
+
+build:
+	mkdir -p $(DIST_DIR)
+	go build -trimpath -ldflags "$(LDFLAGS)" -o $(DIST_DIR)/$(APP) $(CMD)
+	git rev-parse HEAD > $(DIST_DIR)/git-head.txt
+	git show-ref --tags -d > $(DIST_DIR)/git-tags.txt || true
 
 check: test lint safety
