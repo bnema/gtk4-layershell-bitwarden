@@ -30,12 +30,18 @@ func NewService(deps Deps) *Service {
 	}
 }
 
-// emit sends a non-blocking event to the events channel.
+// emit sends a non-blocking event to the events channel. Safe for concurrent
+// use and safe to call after Shutdown.
 func (s *Service) emit(kind EventKind, message string) {
-	select {
-	case s.events <- Event{Kind: kind, Message: message}:
-	default:
+	s.eventMu.RLock()
+	closed := s.eventsClosed
+	if !closed {
+		select {
+		case s.events <- Event{Kind: kind, Message: message}:
+		default:
+		}
 	}
+	s.eventMu.RUnlock()
 }
 
 // Unlock transitions the service from locked to unlocked.
@@ -46,6 +52,8 @@ func (s *Service) Unlock(ctx context.Context, email, password string) (retErr er
 		return fmt.Errorf("app: cannot unlock in state %s", s.state)
 	}
 	s.state = auth.LockStateUnlocking
+	s.lifecycle++
+	token := s.lifecycle
 	s.mu.Unlock()
 
 	s.emit(Unlocking, "unlocking vault")
@@ -63,48 +71,70 @@ func (s *Service) Unlock(ctx context.Context, email, password string) (retErr er
 	// Derive a cache key from the password.
 	key := sha256.Sum256([]byte(password))
 
-	// Load cache snapshot.
-	loaded, err := s.loadCache(ctx, key[:])
+	// Load cache data (items, folders, outbox) without installing state.
+	loadedItems, loadedFolders, outboxMutations, loaded, err := s.loadCacheData(ctx, key[:])
 	if err != nil {
 		// Non-fatal: we can still unlock without cache.
-		s.mu.Lock()
-		s.state = auth.LockStateUnlocked
-		s.mu.Unlock()
 		s.emit(CacheLoaded, fmt.Sprintf("cache load skipped: %v", err))
-		s.emit(IndexReady, "index ready (no cache)")
 	} else if loaded {
 		s.emit(CacheLoaded, "cache loaded from disk")
+	} else {
+		s.emit(CacheLoaded, "no cache found")
+	}
+
+	// Re-acquire lock and install state if lifecycle token still matches.
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.lifecycle != token || s.state != auth.LockStateUnlocking {
+		// Another Lock/Unlock cycle happened, do not install.
+		return fmt.Errorf("app: unlock lifecycle superseded: %w", context.Canceled)
+	}
+
+	// Install cache data.
+	if loaded {
+		s.items = loadedItems
+		s.folders = loadedFolders
+		s.outbox = outboxMutations
+		s.index = vault.BuildIndex(loadedItems)
+	}
+	// Copy cache key for outbox persistence.
+	s.cacheKey = make([]byte, len(key[:]))
+	copy(s.cacheKey, key[:])
+	s.state = auth.LockStateUnlocked
+
+	if loaded {
 		s.emit(IndexReady, "search index ready")
 	}
 
 	// Start background sync worker.
 	ctx, cancel := context.WithCancel(ctx)
-	s.mu.Lock()
 	s.cancelWorkers = cancel
-	s.mu.Unlock()
+	s.emit(Unlocking, "starting sync worker")
 
 	s.startMinimalSyncWorker(ctx)
 
 	return nil
 }
 
-// loadCache attempts to load and decrypt a cached vault snapshot.
-// Returns true if a valid cache was loaded, false with no error if none exists.
-func (s *Service) loadCache(ctx context.Context, key []byte) (bool, error) {
+// loadCacheData loads and decrypts a cached vault snapshot, returning the
+// items, folders, and outbox mutations. It does NOT install state on the
+// service — that is the caller's responsibility.
+func (s *Service) loadCacheData(ctx context.Context, key []byte) (items []vault.Item, folders []vault.Folder, outbox []coresync.OutboxMutation, loaded bool, err error) {
 	snap, err := s.deps.Cache.Load(ctx)
 	if err != nil {
-		return false, fmt.Errorf("cache load: %w", err)
+		return nil, nil, nil, false, fmt.Errorf("cache load: %w", err)
 	}
 
 	if err := cache.ValidateSnapshot(snap); err != nil {
-		return false, fmt.Errorf("cache validation: %w", err)
+		return nil, nil, nil, false, fmt.Errorf("cache validation: %w", err)
 	}
 
 	var ciphertext []byte
 	if s.deps.SecretBox != nil {
 		ciphertext, err = s.deps.SecretBox.Open(snap.VaultCiphertext, key)
 		if err != nil {
-			return false, fmt.Errorf("cache decrypt: %w", err)
+			return nil, nil, nil, false, fmt.Errorf("cache decrypt: %w", err)
 		}
 	} else {
 		ciphertext = snap.VaultCiphertext
@@ -112,29 +142,35 @@ func (s *Service) loadCache(ctx context.Context, key []byte) (bool, error) {
 
 	var plain cache.PlainSnapshot
 	if err := json.Unmarshal(ciphertext, &plain); err != nil {
-		return false, fmt.Errorf("cache decode: %w", err)
+		return nil, nil, nil, false, fmt.Errorf("cache decode: %w", err)
 	}
 
-	var items []vault.Item
 	if err := json.Unmarshal(plain.ItemsJSON, &items); err != nil {
-		return false, fmt.Errorf("cache items decode: %w", err)
+		return nil, nil, nil, false, fmt.Errorf("cache items decode: %w", err)
 	}
 
-	var folders []vault.Folder
 	if err := json.Unmarshal(plain.FoldersJSON, &folders); err != nil {
-		return false, fmt.Errorf("cache folders decode: %w", err)
+		return nil, nil, nil, false, fmt.Errorf("cache folders decode: %w", err)
 	}
 
-	index := vault.BuildIndex(items)
+	// Decode outbox from PlainSnapshot.OutboxJSON.
+	if len(plain.OutboxJSON) > 0 {
+		var cachedOutbox []coresync.OutboxMutation
+		if err := json.Unmarshal(plain.OutboxJSON, &cachedOutbox); err != nil {
+			return nil, nil, nil, false, fmt.Errorf("cache outbox decode: %w", err)
+		}
+		outbox = cachedOutbox
+	}
 
-	s.mu.Lock()
-	s.items = items
-	s.folders = folders
-	s.index = index
-	s.state = auth.LockStateUnlocked
-	s.mu.Unlock()
+	// Load outbox from deps.Outbox if available.
+	if s.deps.Outbox != nil {
+		storedMutations, loadErr := s.deps.Outbox.Load(ctx, key)
+		if loadErr == nil && len(storedMutations) > 0 {
+			outbox = append(outbox, storedMutations...)
+		}
+	}
 
-	return true, nil
+	return items, folders, outbox, true, nil
 }
 
 // Lock transitions the service from unlocked to locked.
@@ -148,10 +184,22 @@ func (s *Service) Lock(ctx context.Context) error {
 		s.cancelWorkers = nil
 	}
 
+	// Increment lifecycle to invalidate any in-flight unlock.
+	s.lifecycle++
+
+	// Clear cache key.
+	s.cacheKey = nil
+
+	// Clear pending remote state.
+	s.pendingRemoteItems = nil
+	s.pendingRemoteFolders = nil
+
 	// Clear in-memory state.
 	s.items = nil
 	s.folders = nil
 	s.index = nil
+	s.outbox = nil
+	s.conflicts = nil
 	s.state = auth.LockStateLocked
 
 	s.emit(Relocked, "vault relocked")
@@ -231,8 +279,24 @@ func (s *Service) Shutdown(ctx context.Context) error {
 		s.cancelWorkers()
 		s.cancelWorkers = nil
 	}
-	close(s.events)
+	// Clear state under s.mu.
+	s.items = nil
+	s.folders = nil
+	s.index = nil
+	s.outbox = nil
+	s.conflicts = nil
+	s.pendingRemoteItems = nil
+	s.pendingRemoteFolders = nil
+	s.cacheKey = nil
+	s.state = auth.LockStateLocked
 	s.mu.Unlock()
+
+	s.eventMu.Lock()
+	if !s.eventsClosed {
+		close(s.events)
+		s.eventsClosed = true
+	}
+	s.eventMu.Unlock()
 	return nil
 }
 
@@ -273,13 +337,29 @@ func (s *Service) appendOutboxLocked(kind coresync.MutationKind, itemID string, 
 		Payload:   payload,
 	}
 	s.outbox = append(s.outbox, m)
+	s.saveCacheAsyncLocked()
 	return m
 }
 
-// saveCacheAsync can trigger an async cache save if cache + secretbox are
-// available. No-op for now to avoid blocking the UI.
-func (s *Service) saveCacheAsync() {
-	// No-op in v0.1.0.
+// saveCacheAsyncLocked snapshots the outbox and cacheKey, then
+// asynchronously persists to deps.Outbox if available.
+// The caller MUST hold s.mu.
+func (s *Service) saveCacheAsyncLocked() {
+	key := make([]byte, len(s.cacheKey))
+	copy(key, s.cacheKey)
+	outboxSnap := make([]coresync.OutboxMutation, len(s.outbox))
+	copy(outboxSnap, s.outbox)
+	store := s.deps.Outbox
+
+	if store == nil || len(key) == 0 {
+		return
+	}
+
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = store.Save(ctx, key, outboxSnap)
+	}()
 }
 
 // ---------------------------------------------------------------------------
@@ -567,9 +647,43 @@ func (s *Service) ResolveConflict(ctx context.Context, conflictID string, resolu
 
 	switch resolution {
 	case coresync.ResolutionKeepRemote:
-		// No local change; remote data wins (installed during sync).
+		// Replace local item with pending remote item if present, or remove
+		// if remote missing.
+		foundRemote := false
+		for _, ritem := range s.pendingRemoteItems {
+			if ritem.ID == conflict.ItemID {
+				for i, item := range s.items {
+					if item.ID == conflict.ItemID {
+						ritem.SyncStatus = vault.SyncStatusSynced
+						ritem.ConflictID = ""
+						s.items[i] = ritem
+						foundRemote = true
+						break
+					}
+				}
+				break
+			}
+		}
+		if !foundRemote {
+			// Remote item not found — it may have been deleted remotely.
+			for i, item := range s.items {
+				if item.ID == conflict.ItemID {
+					s.items = append(s.items[:i], s.items[i+1:]...)
+					break
+				}
+			}
+		}
+		// Remove outbox mutations for this item.
+		var kept []coresync.OutboxMutation
+		for _, m := range s.outbox {
+			if m.ItemID != conflict.ItemID {
+				kept = append(kept, m)
+			}
+		}
+		s.outbox = kept
+
 	case coresync.ResolutionKeepLocal:
-		// Mark the local item as pending so it will be replayed.
+		// Keep existing outbox mutation(s), mark local item pending and clear ConflictID.
 		for i, item := range s.items {
 			if item.ID == conflict.ItemID {
 				s.items[i].SyncStatus = vault.SyncStatusPending
@@ -577,21 +691,44 @@ func (s *Service) ResolveConflict(ctx context.Context, conflictID string, resolu
 				break
 			}
 		}
+
 	case coresync.ResolutionDuplicateLocal:
-		// Clone the conflicting item with a new local ID.
+		// Clone the conflicting item with a new local ID, queue a create mutation.
+		var original vault.Item
+		originalFound := false
 		for _, item := range s.items {
 			if item.ID == conflict.ItemID {
-				dup := item
-				dup.ID = fmt.Sprintf("local-%d", s.now().UnixNano())
-				dup.SyncStatus = vault.SyncStatusPending
-				dup.ConflictID = ""
-				s.items = append(s.items, dup)
+				original = item
+				originalFound = true
 				break
+			}
+		}
+		if originalFound {
+			dup := original
+			dup.ID = fmt.Sprintf("local-%d", s.now().UnixNano())
+			dup.SyncStatus = vault.SyncStatusPending
+			dup.ConflictID = ""
+
+			// Append duplicate.
+			s.items = append(s.items, dup)
+
+			// Queue a create mutation for the duplicate.
+			payload, _ := json.Marshal(dup)
+			s.appendOutboxLocked(coresync.MutationCreate, dup.ID, payload)
+
+			// Clear conflict on original.
+			for i, item := range s.items {
+				if item.ID == conflict.ItemID {
+					s.items[i].ConflictID = ""
+					// Keep original's existing outbox mutations intact.
+					break
+				}
 			}
 		}
 	}
 
 	s.rebuildIndexLocked()
+	s.saveCacheAsyncLocked()
 	s.emit(SyncUpdated, "conflict resolved")
 	return nil
 }
@@ -599,6 +736,57 @@ func (s *Service) ResolveConflict(ctx context.Context, conflictID string, resolu
 // ---------------------------------------------------------------------------
 // Sync
 // ---------------------------------------------------------------------------
+
+// replayOutbox replays outbox mutations against the remote. It must be called
+// OUTSIDE of s.mu to avoid deadlocks with Remote methods.
+func (s *Service) replayOutbox(ctx context.Context, outbox []coresync.OutboxMutation) error {
+	if s.deps.Remote == nil {
+		return nil
+	}
+
+	for _, m := range outbox {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+
+		switch m.Kind {
+		case coresync.MutationCreate, coresync.MutationUpdate:
+			var item vault.Item
+			if err := json.Unmarshal(m.Payload, &item); err != nil {
+				return fmt.Errorf("replay unmarshal: %w", err)
+			}
+			var err error
+			if m.Kind == coresync.MutationCreate {
+				_, err = s.deps.Remote.Create(ctx, item)
+			} else {
+				_, err = s.deps.Remote.Update(ctx, m.ItemID, item)
+			}
+			if err != nil {
+				return fmt.Errorf("replay %s: %w", m.Kind, err)
+			}
+
+		case coresync.MutationTrash:
+			if err := s.deps.Remote.Trash(ctx, m.ItemID); err != nil {
+				return fmt.Errorf("replay trash: %w", err)
+			}
+
+		case coresync.MutationRestore:
+			if _, err := s.deps.Remote.Restore(ctx, m.ItemID); err != nil {
+				return fmt.Errorf("replay restore: %w", err)
+			}
+
+		case coresync.MutationDelete:
+			if err := s.deps.Remote.Delete(ctx, m.ItemID); err != nil {
+				return fmt.Errorf("replay delete: %w", err)
+			}
+
+		default:
+			return fmt.Errorf("%w: unknown mutation kind %s", cerrors.ErrUnsupported, m.Kind)
+		}
+	}
+
+	return nil
+}
 
 // syncOnce performs a single sync cycle: checks remote revision, pushes local
 // mutations, pulls remote changes, and detects conflicts.
@@ -646,16 +834,22 @@ func (s *Service) syncOnce(ctx context.Context) {
 	}
 
 	s.mu.Lock()
-	defer s.mu.Unlock()
 
-	// Check context cancellation before installing state.
+	// Check context cancellation before proceeding.
 	if ctx.Err() != nil {
+		s.mu.Unlock()
 		return
 	}
 
 	// Detect conflicts.
 	conflicts := coresync.DetectConflicts(outboxSnapshot, remoteChanges)
 	if len(conflicts) > 0 {
+		// Store pending remote state for conflict resolution.
+		s.pendingRemoteItems = make([]vault.Item, len(remoteItems))
+		copy(s.pendingRemoteItems, remoteItems)
+		s.pendingRemoteFolders = make([]vault.Folder, len(remoteFolders))
+		copy(s.pendingRemoteFolders, remoteFolders)
+
 		s.conflicts = append(s.conflicts, conflicts...)
 		for _, c := range conflicts {
 			for i, item := range s.items {
@@ -667,19 +861,53 @@ func (s *Service) syncOnce(ctx context.Context) {
 			}
 		}
 		s.rebuildIndexLocked()
+		s.mu.Unlock()
 		s.emit(ConflictDetected, fmt.Sprintf("%d conflict(s) detected", len(conflicts)))
 		return
 	}
 
-	// No conflicts: install remote state.
+	s.mu.Unlock()
+
+	// No conflicts: replay outbox before installing remote state.
+	if len(outboxSnapshot) > 0 {
+		if err := s.replayOutbox(ctx, outboxSnapshot); err != nil {
+			s.emit(SyncFailed, fmt.Sprintf("outbox replay failed: %v", err))
+			// Do NOT clear outbox or install remote state on replay failure.
+			return
+		}
+
+		// Re-fetch remote state after successful replay.
+		remoteItems, remoteFolders, remoteRev, err = s.deps.Remote.Sync(ctx)
+		if err != nil {
+			s.emit(SyncFailed, fmt.Sprintf("post-replay sync failed: %v", err))
+			// Keep outbox intact.
+			return
+		}
+	}
+
+	// Install final remote state under lock.
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if ctx.Err() != nil {
+		return
+	}
+
 	s.items = remoteItems
 	s.folders = remoteFolders
 	for i := range s.items {
 		s.items[i].SyncStatus = vault.SyncStatusSynced
 	}
-	s.outbox = nil
+	if len(outboxSnapshot) > 0 {
+		s.outbox = nil
+	}
+	s.pendingRemoteItems = nil
+	s.pendingRemoteFolders = nil
 	s.rebuildIndexLocked()
 	s.emit(SyncUpdated, fmt.Sprintf("sync complete (rev: %s)", remoteRev))
+
+	// Persist cleared outbox.
+	s.saveCacheAsyncLocked()
 }
 
 // startMinimalSyncWorker starts a background goroutine that runs syncOnce.

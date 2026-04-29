@@ -24,8 +24,12 @@ type Deps struct {
 // Service implements the application's core business logic.
 type Service struct {
 	mu            sync.Mutex
+	eventMu       sync.RWMutex
+	eventsClosed  bool
 	cfg           *config.Config
 	state         auth.LockState
+	lifecycle     uint64
+	cacheKey      []byte
 	items         []vault.Item
 	folders       []vault.Folder
 	outbox        []coresync.OutboxMutation
@@ -34,4 +38,7 @@ type Service struct {
 	events        chan Event
 	cancelWorkers context.CancelFunc
 	deps          Deps
+
+	pendingRemoteItems   []vault.Item
+	pendingRemoteFolders []vault.Folder
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"fmt"
 	"io"
 	"sync"
 	"sync/atomic"
@@ -17,6 +18,33 @@ import (
 	"github.com/bnema/gtk4-layershell-bitwarden/internal/core/vault"
 	"github.com/stretchr/testify/require"
 )
+
+// fakeOutbox implements ports.OutboxStore for testing.
+type fakeOutbox struct {
+	mu         sync.Mutex
+	loadData   []coresync.OutboxMutation
+	loadErr    error
+	saveData   []coresync.OutboxMutation
+	saveKey    []byte
+	saveCalled int
+}
+
+func (o *fakeOutbox) Load(_ context.Context, key []byte) ([]coresync.OutboxMutation, error) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.loadData, o.loadErr
+}
+
+func (o *fakeOutbox) Save(_ context.Context, key []byte, mutations []coresync.OutboxMutation) error {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.saveCalled++
+	o.saveKey = make([]byte, len(key))
+	copy(o.saveKey, key)
+	o.saveData = make([]coresync.OutboxMutation, len(mutations))
+	copy(o.saveData, mutations)
+	return nil
+}
 
 // ---------------------------------------------------------------------------
 // Fake implementations for testing.
@@ -54,14 +82,25 @@ type fakeRemote struct {
 
 	// Configurable Delete
 	deleteErr error
+
+	// Override hooks (for testing lifecycle)
+	onLogin  func(ctx context.Context, email, password string) error
+	onCreate func(ctx context.Context, item vault.Item) (vault.Item, error)
+	onSync   func(ctx context.Context) ([]vault.Item, []vault.Folder, string, error)
 }
 
-func (r *fakeRemote) Login(_ context.Context, email, password string) error {
+func (r *fakeRemote) Login(ctx context.Context, email, password string) error {
 	r.mu.Lock()
-	defer r.mu.Unlock()
+	onLogin := r.onLogin
+	r.mu.Unlock()
+
+	if onLogin != nil {
+		return onLogin(ctx, email, password)
+	}
+
+	r.mu.Lock()
 	r.loginCalled = true
-	_ = email
-	_ = password
+	r.mu.Unlock()
 	return nil
 }
 
@@ -83,12 +122,17 @@ func (r *fakeRemote) Revision(_ context.Context) (string, error) {
 
 func (r *fakeRemote) Sync(ctx context.Context) ([]vault.Item, []vault.Folder, string, error) {
 	r.mu.Lock()
+	onSync := r.onSync
 	blockCh := r.syncBlockCh
 	items := r.syncItems
 	folders := r.syncFolders
 	rev := r.syncRev
 	err := r.syncErr
 	r.mu.Unlock()
+
+	if onSync != nil {
+		return onSync(ctx)
+	}
 
 	if blockCh != nil {
 		select {
@@ -101,11 +145,17 @@ func (r *fakeRemote) Sync(ctx context.Context) ([]vault.Item, []vault.Folder, st
 	return items, folders, rev, err
 }
 
-func (r *fakeRemote) Create(_ context.Context, item vault.Item) (vault.Item, error) {
+func (r *fakeRemote) Create(ctx context.Context, item vault.Item) (vault.Item, error) {
 	r.mu.Lock()
+	onCreate := r.onCreate
 	err := r.createErr
 	result := r.createItem
 	r.mu.Unlock()
+
+	if onCreate != nil {
+		return onCreate(ctx, item)
+	}
+
 	if err != nil {
 		return vault.Item{}, err
 	}
@@ -551,4 +601,349 @@ func TestLockCancelsSyncInstall(t *testing.T) {
 	require.Equal(t, "local-1", svc.items[0].ID)
 	require.Equal(t, "Original", svc.items[0].Name)
 	svc.mu.Unlock()
+}
+
+// ---------------------------------------------------------------------------
+// Outbox-from-cache tests
+// ---------------------------------------------------------------------------
+
+func TestUnlockLoadsOutboxFromCacheAndOutboxStore(t *testing.T) {
+	item := vault.Item{ID: "item-1", Name: "Test", Type: vault.ItemTypeLogin}
+	itemsJSON, _ := json.Marshal([]vault.Item{item})
+	foldersJSON, _ := json.Marshal([]vault.Folder{})
+
+	// Outbox mutation stored in PlainSnapshot.OutboxJSON
+	cachedMutations := []coresync.OutboxMutation{
+		{ID: "m1", Kind: coresync.MutationCreate, ItemID: "item-cached", Payload: []byte(`{"id":"item-cached"}`)},
+	}
+	outboxJSON, _ := json.Marshal(cachedMutations)
+
+	plain := cache.PlainSnapshot{
+		AccountHash:  "test-account-hash",
+		LastRevision: "rev-1",
+		ItemsJSON:    itemsJSON,
+		FoldersJSON:  foldersJSON,
+		OutboxJSON:   outboxJSON,
+	}
+	plainJSON, _ := json.Marshal(plain)
+	key := sha256.Sum256([]byte("mypassword"))
+	box := &fakeSecretBox{}
+	ciphertext, _ := box.Seal(plainJSON, key[:])
+
+	snap := cache.Snapshot{
+		Version:         cache.Version,
+		AccountHash:     "test-account-hash",
+		LastRevision:    "rev-1",
+		SavedAt:         time.Now(),
+		VaultCiphertext: ciphertext,
+	}
+
+	// Outbox store has additional mutations.
+	fo := &fakeOutbox{
+		loadData: []coresync.OutboxMutation{
+			{ID: "m2", Kind: coresync.MutationUpdate, ItemID: "item-store", Payload: []byte(`{"id":"item-store"}`)},
+		},
+	}
+
+	svc := NewService(Deps{
+		Cache:     &fakeCache{data: &snap},
+		SecretBox: &fakeSecretBox{},
+		Outbox:    fo,
+	})
+
+	err := svc.Unlock(context.Background(), "user@test.com", "mypassword")
+	require.NoError(t, err)
+
+	// Verify both outbox sources are loaded.
+	pending := svc.pendingMutationsForTest()
+	require.Len(t, pending, 2)
+
+	// Collect IDs.
+	ids := make(map[string]bool)
+	for _, m := range pending {
+		ids[m.ID] = true
+	}
+	require.True(t, ids["m1"], "expected cached outbox mutation m1")
+	require.True(t, ids["m2"], "expected outbox store mutation m2")
+}
+
+// ---------------------------------------------------------------------------
+// Outbox replay tests
+// ---------------------------------------------------------------------------
+
+func TestSyncReplaysOutboxBeforeClearing(t *testing.T) {
+	// Create an item that the outbox will try to create remotely.
+	pendingItem := vault.Item{
+		ID:   "pending-1",
+		Name: "PendingCreate",
+		Type: vault.ItemTypeLogin,
+	}
+	payload, _ := json.Marshal(pendingItem)
+
+	// Initial items in local state (will be replaced by remote sync after replay).
+	localItem := vault.Item{
+		ID:   "existing-1",
+		Name: "LocalPreSync",
+		Type: vault.ItemTypeLogin,
+	}
+
+	createCalled := make(chan struct{}, 1)
+
+	// First Sync call returns the initial remote state (no conflict with pending create).
+	// After replay, second Sync call returns the final state including replayed create.
+	syncCallCount := 0
+	fr := &fakeRemote{
+		revisionRev: "rev2",
+		syncItems:   []vault.Item{{ID: "existing-1", Name: "RemoteVersion", RevisionDate: time.Now(), Type: vault.ItemTypeLogin}},
+		syncFolders: nil,
+		syncRev:     "rev3",
+		onCreate: func(ctx context.Context, item vault.Item) (vault.Item, error) {
+			createCalled <- struct{}{}
+			// Return a valid item to simulate successful create.
+			return vault.Item{ID: "remote-pending-1", Name: "CreatedRemotely", RevisionDate: time.Now()}, nil
+		},
+	}
+	fr.onSync = func(ctx context.Context) ([]vault.Item, []vault.Folder, string, error) {
+		syncCallCount++
+		if syncCallCount == 1 {
+			return []vault.Item{{ID: "existing-1", Name: "RemoteVersion", RevisionDate: time.Now(), Type: vault.ItemTypeLogin}},
+				nil, "rev3", nil
+		}
+		// Second call includes the newly created item.
+		return []vault.Item{
+			{ID: "existing-1", Name: "RemoteVersion", RevisionDate: time.Now(), Type: vault.ItemTypeLogin},
+			{ID: "remote-pending-1", Name: "CreatedRemotely", RevisionDate: time.Now(), Type: vault.ItemTypeLogin},
+		}, nil, "rev4", nil
+	}
+
+	svc := NewService(Deps{Remote: fr})
+	svc.mu.Lock()
+	svc.state = auth.LockStateUnlocked
+	svc.items = []vault.Item{localItem}
+	svc.outbox = []coresync.OutboxMutation{
+		{ID: "m1", Kind: coresync.MutationCreate, ItemID: "pending-1", Payload: payload},
+	}
+	svc.rebuildIndexLocked()
+	svc.mu.Unlock()
+
+	svc.syncOnce(context.Background())
+
+	// Verify Create was called on remote.
+	select {
+	case <-createCalled:
+		// Success
+	case <-time.After(time.Second):
+		t.Fatal("remote.Create was not called during sync")
+	}
+
+	// Verify outbox is cleared after successful sync.
+	pending := svc.pendingMutationsForTest()
+	require.Len(t, pending, 0, "outbox should be cleared after successful replay and sync")
+
+	// Verify remote state is installed (should have 2 items from second Sync call).
+	items, err := svc.Items(context.Background())
+	require.NoError(t, err)
+	require.Len(t, items, 2, "expected 2 items after replay")
+	require.Equal(t, "RemoteVersion", items[0].Name)
+	require.Equal(t, "CreatedRemotely", items[1].Name)
+}
+
+func TestSyncKeepsOutboxWhenReplayFails(t *testing.T) {
+	localItem := vault.Item{
+		ID:   "item-1",
+		Name: "LocalItem",
+		Type: vault.ItemTypeLogin,
+	}
+	payload, _ := json.Marshal(localItem)
+
+	fr := &fakeRemote{
+		revisionRev: "rev2",
+		createErr:   fmt.Errorf("network error"),
+		syncItems:   []vault.Item{{ID: "remote-1", Name: "RemoteShouldNotInstall", RevisionDate: time.Now(), Type: vault.ItemTypeLogin}},
+		syncFolders: nil,
+		syncRev:     "rev3",
+	}
+
+	svc := NewService(Deps{Remote: fr})
+	svc.mu.Lock()
+	svc.state = auth.LockStateUnlocked
+	svc.items = []vault.Item{localItem}
+	svc.outbox = []coresync.OutboxMutation{
+		{ID: "m1", Kind: coresync.MutationCreate, ItemID: "item-1", Payload: payload},
+	}
+	svc.rebuildIndexLocked()
+	svc.mu.Unlock()
+
+	svc.syncOnce(context.Background())
+
+	// Verify outbox is still intact after replay failure.
+	pending := svc.pendingMutationsForTest()
+	require.Len(t, pending, 1, "outbox should remain after replay failure")
+	require.Equal(t, "m1", pending[0].ID)
+
+	// Verify remote state was NOT installed.
+	items, err := svc.Items(context.Background())
+	require.NoError(t, err)
+	require.Len(t, items, 1)
+	require.Equal(t, "LocalItem", items[0].Name)
+}
+
+// ---------------------------------------------------------------------------
+// Conflict resolution tests
+// ---------------------------------------------------------------------------
+
+func TestResolveConflictDuplicateLocalQueuesCreate(t *testing.T) {
+	localItem := vault.Item{
+		ID:   "item-1",
+		Name: "ConflictedItem",
+		Type: vault.ItemTypeLogin,
+	}
+
+	fr := &fakeRemote{
+		revisionRev: "rev2",
+		syncItems: []vault.Item{
+			{ID: "item-1", Name: "RemoteVersion", RevisionDate: time.Now(), Type: vault.ItemTypeLogin},
+		},
+		syncFolders: nil,
+		syncRev:     "rev3",
+	}
+
+	svc := NewService(Deps{Remote: fr})
+	svc.mu.Lock()
+	svc.state = auth.LockStateUnlocked
+	svc.items = []vault.Item{localItem}
+	svc.outbox = []coresync.OutboxMutation{
+		{ID: "m1", Kind: coresync.MutationUpdate, ItemID: "item-1", Payload: []byte(`{"name":"UpdatedLocally"}`)},
+	}
+	svc.rebuildIndexLocked()
+	svc.mu.Unlock()
+
+	// Run sync to trigger conflict detection.
+	svc.syncOnce(context.Background())
+
+	// Verify conflict was detected.
+	conflicts := svc.conflictsForTest()
+	require.Len(t, conflicts, 1, "expected 1 conflict")
+	require.Equal(t, "item-1", conflicts[0].ItemID)
+
+	// Verify pending remote items are stored.
+	svc.mu.Lock()
+	require.Len(t, svc.pendingRemoteItems, 1)
+	require.Equal(t, "RemoteVersion", svc.pendingRemoteItems[0].Name)
+	svc.mu.Unlock()
+
+	// Resolve by duplicating local.
+	err := svc.ResolveConflict(context.Background(), conflicts[0].ID, coresync.ResolutionDuplicateLocal)
+	require.NoError(t, err)
+
+	// Verify a new item with local-* ID was added.
+	items, err := svc.Items(context.Background())
+	require.NoError(t, err)
+	require.Len(t, items, 2, "expected original + duplicate")
+
+	var original, duplicate vault.Item
+	for _, it := range items {
+		if it.ID == "item-1" {
+			original = it
+		} else {
+			duplicate = it
+		}
+	}
+
+	require.Equal(t, "item-1", original.ID)
+	require.Empty(t, original.ConflictID, "original should have conflict cleared")
+	require.Contains(t, duplicate.ID, "local-", "duplicate should have local ID")
+	require.Equal(t, vault.SyncStatusPending, duplicate.SyncStatus, "duplicate should be pending")
+
+	// Verify a create mutation was queued for the duplicate.
+	pending := svc.pendingMutationsForTest()
+	foundCreate := false
+	for _, m := range pending {
+		if m.Kind == coresync.MutationCreate && m.ItemID == duplicate.ID {
+			foundCreate = true
+			break
+		}
+	}
+	require.True(t, foundCreate, "expected a create mutation for the duplicate item")
+
+	// Verify no conflicts remain.
+	require.Len(t, svc.conflictsForTest(), 0)
+}
+
+// ---------------------------------------------------------------------------
+// Event safety tests
+// ---------------------------------------------------------------------------
+
+func TestEmitAfterShutdownDoesNotPanic(t *testing.T) {
+	svc := NewService(Deps{})
+
+	// Shutdown.
+	err := svc.Shutdown(context.Background())
+	require.NoError(t, err)
+
+	// emit must not panic.
+	require.NotPanics(t, func() {
+		svc.emit(SyncUpdated, "after shutdown")
+		svc.emit(SyncFailed, "another after shutdown")
+	})
+
+	// The channel should be closed.
+	_, ok := <-svc.Events()
+	require.False(t, ok, "events channel should be closed")
+}
+
+// ---------------------------------------------------------------------------
+// Lock/Unlock interleaving tests
+// ---------------------------------------------------------------------------
+
+func TestLockDuringUnlockPreventsInstall(t *testing.T) {
+	loginBlockCh := make(chan struct{})
+
+	fr := &fakeRemote{
+		onLogin: func(_ context.Context, _, _ string) error {
+			<-loginBlockCh
+			return nil
+		},
+	}
+
+	snap := buildValidSnapshot(t, "pw", []vault.Item{
+		{ID: "item-1", Name: "ShouldNotAppear", Type: vault.ItemTypeLogin},
+	}, nil)
+
+	svc := NewService(Deps{
+		Remote:    fr,
+		Cache:     &fakeCache{data: &snap},
+		SecretBox: &fakeSecretBox{},
+	})
+
+	// Start Unlock in a goroutine.
+	unlockErrCh := make(chan error, 1)
+	go func() {
+		unlockErrCh <- svc.Unlock(context.Background(), "user@test.com", "pw")
+	}()
+
+	// Wait for Unlock to reach Login (blocked).
+	time.Sleep(50 * time.Millisecond)
+
+	// Call Lock while Unlock is blocked on login.
+	lockErr := svc.Lock(context.Background())
+	require.NoError(t, lockErr)
+
+	// Unblock login.
+	close(loginBlockCh)
+
+	// Wait for Unlock to finish.
+	unlockErr := <-unlockErrCh
+	require.Error(t, unlockErr, "Unlock should return error after Lock intervened")
+
+	// Verify service is locked and no items installed.
+	svc.mu.Lock()
+	require.Equal(t, auth.LockStateLocked, svc.state)
+	require.Nil(t, svc.items)
+	require.Nil(t, svc.index)
+	svc.mu.Unlock()
+
+	// Search should return locked error.
+	_, err := svc.Search(context.Background(), "test", 10)
+	require.ErrorIs(t, err, coreerrors.ErrLocked)
 }
