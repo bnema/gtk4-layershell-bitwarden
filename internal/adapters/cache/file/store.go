@@ -68,11 +68,16 @@ func (s *Store) Save(ctx context.Context, snapshot cache.Snapshot) error {
 		return err
 	}
 
-	// Write atomically: temp file in same directory, fsync, rename.
-	// Use closeOnError flag to avoid double-close on success path.
-	tmpFile := s.path + ".tmp"
-	f, err := os.OpenFile(tmpFile, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
+	// Write atomically: unique temp file in same directory, fsync, rename.
+	// Unique names avoid overlapping async Save calls clobbering one shared .tmp.
+	f, err := os.CreateTemp(dir, "."+filepath.Base(s.path)+"-*.tmp")
 	if err != nil {
+		return err
+	}
+	tmpFile := f.Name()
+	if err := f.Chmod(0600); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmpFile)
 		return err
 	}
 	closeOnError := true

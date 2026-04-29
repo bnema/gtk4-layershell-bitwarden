@@ -131,9 +131,10 @@ func TestSearchDoesNotIndexCardNumberCodeOrHiddenFields(t *testing.T) {
 func TestSearchDoesNotIndexIdentityGovernmentIDs(t *testing.T) {
 	items := []Item{
 		{
-			ID:   "1",
-			Name: "Identity",
-			Type: ItemTypeIdentity,
+			ID:           "1",
+			Name:         "Identity",
+			Type:         ItemTypeIdentity,
+			RevisionDate: time.Now(),
 			Identity: &Identity{
 				FirstName:      "Alice",
 				SSN:            "999-99-9999",

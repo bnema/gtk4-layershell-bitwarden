@@ -64,7 +64,8 @@ On first run the application looks for a configuration file at:
 ~/.config/gtk4-layershell-bitwarden/config.toml
 ```
 
-(`$XDG_CONFIG_HOME` is respected if set.)
+(`$XDG_CONFIG_HOME` is respected if set; falls back to `os.UserConfigDir()`
+and finally to `./gtk4-layershell-bitwarden/config.toml` as a last resort.)
 
 Start by copying the example config:
 
@@ -140,6 +141,17 @@ phase.
 
 ## Cache and Security Model
 
+- **File paths**: All XDG paths are centralized in
+  `internal/adapters/paths/xdg/`. Config, cache, outbox, and state/log paths
+  are derived from the same adapter:
+  - **Config**: `$XDG_CONFIG_HOME/gtk4-layershell-bitwarden/config.toml` —
+    falls back to `os.UserConfigDir()`, then `./`.
+  - **Cache / Outbox**: `$XDG_CACHE_HOME/gtk4-layershell-bitwarden/{cache,outbox}.json` —
+    falls back to `os.UserCacheDir()`, then `os.TempDir()`.
+  - **State / Log**: `$XDG_STATE_HOME/gtk4-layershell-bitwarden/` —
+    falls back to `$HOME/.local/state/`, then `os.TempDir()/state/`.
+    A `LogFile()` path helper exists for future use; the current logger
+    defaults to discard unless injected.
 - **Encrypted cache**: The vault snapshot and outbox are stored on disk
   encrypted with a key derived from the master password (SHA-256). See
   `internal/adapters/cache/`.
@@ -201,6 +213,19 @@ No vendoring or `go mod vendor` is used. The SDK fork is resolved by the
 
 No tests run against a live Bitwarden server by default. All tests operate
 on in-memory or local isolated data.
+
+### Forked dependency: `github.com/bnema/purego`
+
+`github.com/bnema/puregotk` (v0.5.1) transitively pulls a fork of the
+[cgo-free FFI library `purego`](https://github.com/ebitengine/purego) from
+`github.com/bnema/purego` (v0.11.0-bnema.2). This fork includes patches
+necessary for Wayland/GTK4 layer-shell support that are not yet upstream.
+
+The version is pinned by `puregotk`'s `go.mod` and is not directly
+required in this project's `go.mod`. The fork is maintained by the same
+organisation that maintains `puregotk`. No `replace` directive is needed;
+the version is resolved transitively. If the patches are merged upstream,
+the dependency can be switched back to the official `github.com/ebitengine/purego`.
 
 ---
 

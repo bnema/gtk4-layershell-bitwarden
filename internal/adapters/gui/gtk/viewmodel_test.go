@@ -299,8 +299,12 @@ func TestDetailFromItem_Login(t *testing.T) {
 	require.Len(t, vm.URIs, 1)
 	require.True(t, vm.PasswordPresent)
 	require.True(t, vm.TOTPPresent)
-	// Secret values not exposed via string fields
-	require.NotEqual(t, "secret", vm.Username)
+	// No secret values leaked into non-sensitive fields
+	require.NotContains(t, vm.Username, "secret")
+	require.NotContains(t, vm.Username, "totp")
+	for _, uri := range vm.URIs {
+		require.NotContains(t, uri, "totp")
+	}
 }
 
 func TestDetailFromItem_Card(t *testing.T) {

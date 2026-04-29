@@ -16,8 +16,8 @@
 # revision_check_interval = "5m"         # how often to check remote revision
 
 [security]
-# idle_relock_after = "15m"              # relock after inactivity
-# resident_relock_after = "30m"          # relock when compositor surface is lost
+# idle_relock_after = "15m"              # relock after keyboard/mouse inactivity (idle timeout)
+# resident_relock_after = "30m"          # relock when the overlay surface loses compositor focus (e.g. window switched)
 
 [security.background_sync]
 # enabled = true

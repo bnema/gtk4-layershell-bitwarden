@@ -170,8 +170,10 @@ func scoreKeyword(keyword, query string, boost int) int {
 
 // wordPrefixMatch returns true if query is a prefix of any word in s.
 // Words are delimited by whitespace, hyphens, underscores, dots, slashes.
+// This allows matching e.g. "ex" against "https://example.com/login" by
+// matching the start of each path segment delimited by '/', '_', '-', etc.
 func wordPrefixMatch(s, query string) bool {
-	// Check each word boundary.
+	// Walk runes and check each word boundary.
 	start := 0
 	for i, r := range s {
 		if isWordBoundary(r) {

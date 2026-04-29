@@ -114,20 +114,34 @@ func shouldRedact(key string) bool {
 
 // hasWord reports whether substr appears as a whole word in s, where word
 // boundaries are start-of-string, end-of-string, '_', '-', or '.'.
+// Operates on runes to handle multi-byte characters correctly.
 func hasWord(s, substr string) bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			// check character before match
-			if i > 0 && s[i-1] != '_' && s[i-1] != '-' && s[i-1] != '.' {
-				continue
+	sub := []rune(substr)
+	runes := []rune(s)
+	if len(sub) == 0 || len(sub) > len(runes) {
+		return false
+	}
+	for i := 0; i <= len(runes)-len(sub); i++ {
+		match := true
+		for j := 0; j < len(sub); j++ {
+			if runes[i+j] != sub[j] {
+				match = false
+				break
 			}
-			// check character after match
-			end := i + len(substr)
-			if end < len(s) && s[end] != '_' && s[end] != '-' && s[end] != '.' {
-				continue
-			}
-			return true
 		}
+		if !match {
+			continue
+		}
+		// check rune before match
+		if i > 0 && runes[i-1] != '_' && runes[i-1] != '-' && runes[i-1] != '.' {
+			continue
+		}
+		// check rune after match
+		end := i + len(sub)
+		if end < len(runes) && runes[end] != '_' && runes[end] != '-' && runes[end] != '.' {
+			continue
+		}
+		return true
 	}
 	return false
 }

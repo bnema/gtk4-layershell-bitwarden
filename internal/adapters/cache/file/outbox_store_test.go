@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 	"golang.org/x/crypto/chacha20poly1305"
@@ -24,9 +25,11 @@ func TestOutboxStore_SaveThenLoad_RoundTrip(t *testing.T) {
 		key[i] = byte(i)
 	}
 
+	createdAt := time.Date(2024, 1, 15, 10, 30, 0, 0, time.UTC)
+
 	mutations := []coresync.OutboxMutation{
-		{ID: "m1", Kind: coresync.MutationCreate, ItemID: "item-1", Payload: []byte(`{"id":"item-1"}`)},
-		{ID: "m2", Kind: coresync.MutationUpdate, ItemID: "item-2", Payload: []byte(`{"id":"item-2"}`)},
+		{ID: "m1", Kind: coresync.MutationCreate, ItemID: "item-1", BaseRevision: "rev1", CreatedAt: createdAt, Payload: []byte(`{"id":"item-1"}`)},
+		{ID: "m2", Kind: coresync.MutationUpdate, ItemID: "item-2", BaseRevision: "rev2", CreatedAt: createdAt.Add(time.Hour), Payload: []byte(`{"id":"item-2"}`)},
 	}
 
 	err := store.Save(context.Background(), key, mutations)
@@ -45,6 +48,12 @@ func TestOutboxStore_SaveThenLoad_RoundTrip(t *testing.T) {
 	require.Equal(t, mutations[1].ID, loaded[1].ID)
 	require.Equal(t, mutations[0].Kind, loaded[0].Kind)
 	require.Equal(t, mutations[1].Kind, loaded[1].Kind)
+	require.Equal(t, mutations[0].ItemID, loaded[0].ItemID, "ItemID should survive round-trip")
+	require.Equal(t, mutations[1].ItemID, loaded[1].ItemID, "ItemID should survive round-trip")
+	require.Equal(t, mutations[0].BaseRevision, loaded[0].BaseRevision, "BaseRevision should survive round-trip")
+	require.Equal(t, mutations[1].BaseRevision, loaded[1].BaseRevision, "BaseRevision should survive round-trip")
+	require.True(t, mutations[0].CreatedAt.Equal(loaded[0].CreatedAt), "CreatedAt should survive round-trip")
+	require.True(t, mutations[1].CreatedAt.Equal(loaded[1].CreatedAt), "CreatedAt should survive round-trip")
 	require.Equal(t, mutations[0].Payload, loaded[0].Payload)
 	require.Equal(t, mutations[1].Payload, loaded[1].Payload)
 }

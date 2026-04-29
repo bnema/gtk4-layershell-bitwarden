@@ -111,6 +111,8 @@ func (s *State) OpenDetail() {
 // From ModeSearch, Back is a no-op (caller can use it to close).
 func (s *State) Back() {
 	switch s.Mode {
+	case ModeSearch:
+		// No-op: caller can use this event to close the overlay.
 	case ModeDetail, ModeForm:
 		s.Mode = ModeSearch
 		s.DetailID = ""

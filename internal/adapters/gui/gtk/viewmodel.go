@@ -131,20 +131,7 @@ func DetailFromItem(item corevault.Item) DetailViewModel {
 		}
 	case corevault.ItemTypeIdentity:
 		if item.Identity != nil {
-			parts := make([]string, 0, 5)
-			if item.Identity.Title != "" {
-				parts = append(parts, item.Identity.Title)
-			}
-			if item.Identity.FirstName != "" {
-				parts = append(parts, item.Identity.FirstName)
-			}
-			if item.Identity.MiddleName != "" {
-				parts = append(parts, item.Identity.MiddleName)
-			}
-			if item.Identity.LastName != "" {
-				parts = append(parts, item.Identity.LastName)
-			}
-			vm.IdentityName = strings.Join(parts, " ")
+			vm.IdentityName = display.BuildIdentityName(item.Identity)
 			vm.IdentityEmail = item.Identity.Email
 			vm.HasSSN = item.Identity.SSN != ""
 			vm.HasPassport = item.Identity.PassportNumber != ""

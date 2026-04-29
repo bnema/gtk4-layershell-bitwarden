@@ -62,3 +62,17 @@ func TestValidateSnapshotEmptyVaultCiphertextSlice(t *testing.T) {
 		t.Errorf("expected ErrEmptyVaultCipher, got %v", err)
 	}
 }
+
+func TestValidateSnapshotValidWithoutOutbox(t *testing.T) {
+	s := Snapshot{
+		Version:          Version,
+		AccountHash:      "abc123",
+		LastRevision:     "rev1",
+		SavedAt:          time.Now(),
+		VaultCiphertext:  []byte("encrypted-data"),
+		OutboxCiphertext: nil,
+	}
+	if err := ValidateSnapshot(s); err != nil {
+		t.Errorf("expected nil error for valid snapshot without outbox, got %v", err)
+	}
+}

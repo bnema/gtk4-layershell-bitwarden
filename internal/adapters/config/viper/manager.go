@@ -13,6 +13,7 @@ import (
 	"github.com/pelletier/go-toml/v2"
 	"github.com/spf13/viper"
 
+	"github.com/bnema/gtk4-layershell-bitwarden/internal/adapters/paths/xdg"
 	coreconfig "github.com/bnema/gtk4-layershell-bitwarden/internal/core/config"
 )
 
@@ -37,18 +38,9 @@ func NewManager(path string) *Manager {
 	}
 }
 
-// defaultConfigPath computes the default config file path.
+// defaultConfigPath computes the default config file path via the xdg adapter.
 func defaultConfigPath() string {
-	base := os.Getenv("XDG_CONFIG_HOME")
-	if base == "" {
-		dir, err := os.UserConfigDir()
-		if err != nil {
-			base = "." // last resort
-		} else {
-			base = dir
-		}
-	}
-	return filepath.Join(base, "gtk4-layershell-bitwarden", "config.toml")
+	return xdg.Default().ConfigFile()
 }
 
 // setDefaults populates viper with default configuration values using

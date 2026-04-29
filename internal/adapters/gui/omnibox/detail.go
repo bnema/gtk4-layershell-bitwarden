@@ -1,8 +1,6 @@
 package omnibox
 
 import (
-	"strings"
-
 	"github.com/bnema/gtk4-layershell-bitwarden/internal/adapters/gui/display"
 	"github.com/bnema/gtk4-layershell-bitwarden/internal/core/vault"
 )
@@ -23,6 +21,9 @@ type Detail struct {
 	Conflict        bool
 	Pending         bool
 	Deleted         bool
+
+	// Login safe fields
+	URIs []string
 
 	// Card safe fields
 	CardBrand string
@@ -51,6 +52,9 @@ func DetailFromItem(item vault.Item) Detail {
 			if len(item.Login.URIs) > 0 {
 				d.URI = item.Login.URIs[0].URI
 			}
+			for _, u := range item.Login.URIs {
+				d.URIs = append(d.URIs, u.URI)
+			}
 			d.PasswordPresent = item.Login.Password != ""
 			d.TOTPPresent = item.Login.TOTP != ""
 		}
@@ -65,20 +69,7 @@ func DetailFromItem(item vault.Item) Detail {
 
 	case vault.ItemTypeIdentity:
 		if item.Identity != nil {
-			parts := make([]string, 0, 5)
-			if item.Identity.Title != "" {
-				parts = append(parts, item.Identity.Title)
-			}
-			if item.Identity.FirstName != "" {
-				parts = append(parts, item.Identity.FirstName)
-			}
-			if item.Identity.MiddleName != "" {
-				parts = append(parts, item.Identity.MiddleName)
-			}
-			if item.Identity.LastName != "" {
-				parts = append(parts, item.Identity.LastName)
-			}
-			d.IdentityName = strings.Join(parts, " ")
+			d.IdentityName = display.BuildIdentityName(item.Identity)
 			// SSN, PassportNumber, LicenseNumber are intentionally NOT exposed.
 		}
 	}

@@ -21,7 +21,11 @@ func tempConfig(t *testing.T) (*Manager, string, func()) {
 	require.NoError(t, err)
 	path := filepath.Join(dir, "config.toml")
 	mgr := NewManager(path)
-	return mgr, dir, func() { require.NoError(t, os.RemoveAll(dir)) }
+	return mgr, dir, func() {
+		if err := os.RemoveAll(dir); err != nil {
+			t.Errorf("failed to remove temp dir: %v", err)
+		}
+	}
 }
 
 func TestLoadMissingConfigReturnsDefaultsNoError(t *testing.T) {

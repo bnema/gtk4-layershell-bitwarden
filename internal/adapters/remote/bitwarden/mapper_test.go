@@ -258,12 +258,10 @@ func TestMapLoginItemToSDK(t *testing.T) {
 	assert.Equal(t, "bob", si.Username)
 
 	// Password should be a non-nil Secret that reveals correctly.
-	if si.Password != nil {
-		assert.Equal(t, "pass123", revealSecret(si.Password))
-	}
-	if si.TOTP != nil {
-		assert.Equal(t, "totpkey", revealSecret(si.TOTP))
-	}
+	require.NotNil(t, si.Password)
+	assert.Equal(t, "pass123", revealSecret(si.Password))
+	require.NotNil(t, si.TOTP)
+	assert.Equal(t, "totpkey", revealSecret(si.TOTP))
 
 	assert.Equal(t, "https://bob.example.com", si.URI)
 	require.Len(t, si.URIs, 1)

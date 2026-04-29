@@ -22,7 +22,7 @@ func executeCmd(t *testing.T, opts Options, args []string) (string, error) {
 	root.SetOut(buf)
 	root.SetErr(buf)
 	root.SetArgs(args)
-	err := root.Execute()
+	err := root.ExecuteContext(context.Background())
 	return buf.String(), err
 }
 

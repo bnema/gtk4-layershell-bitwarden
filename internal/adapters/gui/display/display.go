@@ -6,7 +6,6 @@ package display
 import (
 	"net/url"
 	"strings"
-	"unicode/utf8"
 
 	"github.com/bnema/gtk4-layershell-bitwarden/internal/core/vault"
 )
@@ -84,21 +83,35 @@ func SafeURI(raw string) string {
 }
 
 // SafeLast4 returns the last 4 runes of a string if it is at least 4 runes
-// long. It operates on runes (Unicode code points) to handle multi-byte
-// characters correctly. Returns empty string otherwise.
+// long. Operates on runes to handle multi-byte characters correctly.
+// Returns empty string otherwise.
 func SafeLast4(s string) string {
-	runeCount := utf8.RuneCountInString(s)
-	if runeCount < 4 {
+	runes := []rune(s)
+	if len(runes) < 4 {
 		return ""
 	}
-	// Walk to the 4th-from-last rune.
-	i := 0
-	for range s {
-		if i == runeCount-4 {
-			break
-		}
-		_, size := utf8.DecodeRuneInString(s[i:])
-		i += size
+	return string(runes[len(runes)-4:])
+}
+
+// BuildIdentityName returns the full display name for an Identity vault item.
+// Combines Title, FirstName, MiddleName, and LastName separated by spaces.
+// Returns empty string if none are set.
+func BuildIdentityName(identity *vault.Identity) string {
+	if identity == nil {
+		return ""
 	}
-	return s[i:]
+	parts := make([]string, 0, 4)
+	if identity.Title != "" {
+		parts = append(parts, identity.Title)
+	}
+	if identity.FirstName != "" {
+		parts = append(parts, identity.FirstName)
+	}
+	if identity.MiddleName != "" {
+		parts = append(parts, identity.MiddleName)
+	}
+	if identity.LastName != "" {
+		parts = append(parts, identity.LastName)
+	}
+	return strings.Join(parts, " ")
 }

@@ -22,6 +22,7 @@ type Adapter struct {
 	clearer Clearer
 	timer   *time.Timer
 	value   string
+	gen     uint64
 }
 
 // New returns a new Adapter. If set or clear is nil, safe in-memory defaults
@@ -48,11 +49,15 @@ func (a *Adapter) Set(ctx context.Context, text string, ttl time.Duration) error
 	default:
 	}
 
-	// Cancel any previous clear timer.
+	// Cancel any previous clear timer and advance the generation. Stop alone is
+	// not sufficient once a timer callback has fired and is waiting on a.mu; the
+	// generation check prevents that stale callback from clearing newer content.
 	if a.timer != nil {
 		a.timer.Stop()
 		a.timer = nil
 	}
+	a.gen++
+	generation := a.gen
 
 	if err := a.setter(text); err != nil {
 		return err
@@ -64,8 +69,12 @@ func (a *Adapter) Set(ctx context.Context, text string, ttl time.Duration) error
 		a.timer = time.AfterFunc(ttl, func() {
 			a.mu.Lock()
 			defer a.mu.Unlock()
+			if generation != a.gen {
+				return
+			}
 			_ = a.clearer()
 			a.value = ""
+			a.timer = nil
 		})
 	}
 
@@ -88,6 +97,7 @@ func (a *Adapter) Clear(ctx context.Context) error {
 		a.timer.Stop()
 		a.timer = nil
 	}
+	a.gen++
 
 	a.value = ""
 	return a.clearer()

@@ -3,8 +3,6 @@ package cobra
 import (
 	"context"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strconv"
 
 	"github.com/spf13/cobra"
@@ -14,6 +12,7 @@ import (
 	viperadapter "github.com/bnema/gtk4-layershell-bitwarden/internal/adapters/config/viper"
 	"github.com/bnema/gtk4-layershell-bitwarden/internal/adapters/gui/gtk"
 	loggeradapter "github.com/bnema/gtk4-layershell-bitwarden/internal/adapters/logging"
+	"github.com/bnema/gtk4-layershell-bitwarden/internal/adapters/paths/xdg"
 	remoteadapter "github.com/bnema/gtk4-layershell-bitwarden/internal/adapters/remote/bitwarden"
 	"github.com/bnema/gtk4-layershell-bitwarden/internal/app"
 	coreconfig "github.com/bnema/gtk4-layershell-bitwarden/internal/core/config"
@@ -44,8 +43,11 @@ func NewRootCommand(opts Options) *cobra.Command {
 				return fmt.Errorf("config load: %w", err)
 			}
 
+			// Compute cache/outbox paths once.
+			cachePath, outboxPath := xdg.Default().CacheFile(), xdg.Default().OutboxFile()
+
 			// Compose application service.
-			svc, err := composeService(cmd.Context(), cfg)
+			svc, err := composeService(cmd.Context(), cfg, cachePath, outboxPath)
 			if err != nil {
 				return fmt.Errorf("compose service: %w", err)
 			}
@@ -74,8 +76,8 @@ func NewRootCommand(opts Options) *cobra.Command {
 		},
 	}
 
-	// Derive default cache/outbox paths for subcommands.
-	cachePath, outboxPath := defaultCachePaths()
+	// Derive default cache/outbox paths once for subcommands.
+	cachePath, outboxPath := xdg.Default().CacheFile(), xdg.Default().OutboxFile()
 
 	root.AddCommand(newConfigCmd(opts))
 	root.AddCommand(newCacheCmd(cachePath, outboxPath))
@@ -90,7 +92,8 @@ func NewRootCommand(opts Options) *cobra.Command {
 // ---------------------------------------------------------------------------
 
 // composeService builds all application dependencies and returns the service.
-func composeService(ctx context.Context, cfg *coreconfig.Config) (in.AppService, error) {
+// cachePath and outboxPath should be computed once by the caller.
+func composeService(ctx context.Context, cfg *coreconfig.Config, cachePath, outboxPath string) (in.AppService, error) {
 	// Logger: discard by default (nil → io.Discard).
 	logger := loggeradapter.New(nil)
 
@@ -98,7 +101,6 @@ func composeService(ctx context.Context, cfg *coreconfig.Config) (in.AppService,
 	box := cryptobox.NewBox()
 
 	// File-backed cache and outbox stores.
-	cachePath, outboxPath := defaultCachePaths()
 	cacheStore := cachefile.NewStore(cachePath)
 	outboxStore := cachefile.NewOutboxStore(outboxPath, box)
 
@@ -120,19 +122,6 @@ func composeService(ctx context.Context, cfg *coreconfig.Config) (in.AppService,
 	})
 
 	return svc, nil
-}
-
-// defaultCachePaths returns the default file paths for cache and outbox.
-// Uses os.UserCacheDir with a fallback to os.TempDir.
-func defaultCachePaths() (cachePath, outboxPath string) {
-	base := ""
-	if dir, err := os.UserCacheDir(); err == nil {
-		base = dir
-	} else {
-		base = os.TempDir()
-	}
-	appDir := filepath.Join(base, "gtk4-layershell-bitwarden")
-	return filepath.Join(appDir, "cache.json"), filepath.Join(appDir, "outbox.json")
 }
 
 // ---------------------------------------------------------------------------
