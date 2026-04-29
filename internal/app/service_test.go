@@ -59,6 +59,8 @@ type fakeRemote struct {
 	revisionErr error
 	syncStarted atomic.Bool
 
+	syncCalled atomic.Int32
+
 	// Configurable Sync
 	syncBlockCh chan struct{}
 	syncItems   []vault.Item
@@ -122,6 +124,8 @@ func (r *fakeRemote) Revision(_ context.Context) (string, error) {
 }
 
 func (r *fakeRemote) Sync(ctx context.Context) ([]vault.Item, []vault.Folder, string, error) {
+	r.syncCalled.Add(1)
+
 	r.mu.Lock()
 	onSync := r.onSync
 	blockCh := r.syncBlockCh
