@@ -105,7 +105,7 @@ type Attachment struct {
 	ID       string `json:"id"`
 	FileName string `json:"fileName"`
 	Size     string `json:"size"`
-	Url      string `json:"url"`
+	URL      string `json:"url"`
 }
 
 // Folder represents a folder for organising vault items.

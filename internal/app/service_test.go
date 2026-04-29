@@ -281,6 +281,7 @@ func buildValidSnapshot(t *testing.T, password string, items []vault.Item, folde
 	plain := cache.PlainSnapshot{
 		AccountHash:  "test-account-hash",
 		LastRevision: "rev-1",
+		SavedAt:      time.Now(),
 		ItemsJSON:    itemsJSON,
 		FoldersJSON:  foldersJSON,
 	}
@@ -621,6 +622,7 @@ func TestUnlockLoadsOutboxFromCacheAndOutboxStore(t *testing.T) {
 	plain := cache.PlainSnapshot{
 		AccountHash:  "test-account-hash",
 		LastRevision: "rev-1",
+		SavedAt:      time.Now(),
 		ItemsJSON:    itemsJSON,
 		FoldersJSON:  foldersJSON,
 		OutboxJSON:   outboxJSON,
@@ -665,6 +667,109 @@ func TestUnlockLoadsOutboxFromCacheAndOutboxStore(t *testing.T) {
 	}
 	require.True(t, ids["m1"], "expected cached outbox mutation m1")
 	require.True(t, ids["m2"], "expected outbox store mutation m2")
+}
+
+func TestUnlockDeduplicatesOutboxMutations(t *testing.T) {
+	item := vault.Item{ID: "item-1", Name: "Test", Type: vault.ItemTypeLogin}
+	itemsJSON, _ := json.Marshal([]vault.Item{item})
+	foldersJSON, _ := json.Marshal([]vault.Folder{})
+
+	// Both cache and OutboxStore provide mutation ID m1.
+	cachedMutations := []coresync.OutboxMutation{
+		{ID: "m1", Kind: coresync.MutationCreate, ItemID: "item-cached", Payload: []byte(`{"id":"item-cached"}`)},
+	}
+	outboxJSON, _ := json.Marshal(cachedMutations)
+
+	plain := cache.PlainSnapshot{
+		AccountHash:  "test-account-hash",
+		LastRevision: "rev-1",
+		SavedAt:      time.Now(),
+		ItemsJSON:    itemsJSON,
+		FoldersJSON:  foldersJSON,
+		OutboxJSON:   outboxJSON,
+	}
+	plainJSON, _ := json.Marshal(plain)
+	key := sha256.Sum256([]byte("mypassword"))
+	box := &fakeSecretBox{}
+	ciphertext, _ := box.Seal(plainJSON, key[:])
+
+	snap := cache.Snapshot{
+		Version:         cache.Version,
+		AccountHash:     "test-account-hash",
+		LastRevision:    "rev-1",
+		SavedAt:         time.Now(),
+		VaultCiphertext: ciphertext,
+	}
+
+	// Outbox store also has m1 (duplicate) plus a unique m3.
+	fo := &fakeOutbox{
+		loadData: []coresync.OutboxMutation{
+			{ID: "m1", Kind: coresync.MutationUpdate, ItemID: "item-store", Payload: []byte(`{"id":"item-store"}`)},
+			{ID: "m3", Kind: coresync.MutationDelete, ItemID: "item-store", Payload: []byte(`{"id":"item-store"}`)},
+		},
+	}
+
+	svc := NewService(Deps{
+		Cache:     &fakeCache{data: &snap},
+		SecretBox: &fakeSecretBox{},
+		Outbox:    fo,
+	})
+
+	err := svc.Unlock(context.Background(), "user@test.com", "mypassword")
+	require.NoError(t, err)
+
+	// Only one m1 and one m3 should be present (deduplicated).
+	pending := svc.pendingMutationsForTest()
+	require.Len(t, pending, 2, "expected 2 unique mutations after dedup")
+
+	m1Count := 0
+	m3Count := 0
+	for _, m := range pending {
+		switch m.ID {
+		case "m1":
+			m1Count++
+		case "m3":
+			m3Count++
+		}
+	}
+	require.Equal(t, 1, m1Count, "m1 should appear exactly once")
+	require.Equal(t, 1, m3Count, "m3 should appear exactly once")
+}
+
+func TestLockZeroesCacheKey(t *testing.T) {
+	item := vault.Item{ID: "item-1", Name: "Test", Type: vault.ItemTypeLogin}
+	snap := buildValidSnapshot(t, "mypassword", []vault.Item{item}, nil)
+
+	svc := NewService(Deps{
+		Cache:     &fakeCache{data: &snap},
+		SecretBox: &fakeSecretBox{},
+	})
+
+	err := svc.Unlock(context.Background(), "user@test.com", "mypassword")
+	require.NoError(t, err)
+
+	// Grab a reference to cacheKey before Lock clears it.
+	svc.mu.Lock()
+	oldKey := svc.cacheKey
+	oldCopy := make([]byte, len(oldKey))
+	copy(oldCopy, oldKey)
+	svc.mu.Unlock()
+
+	require.NotNil(t, oldKey, "cacheKey should be set after unlock")
+
+	err = svc.Lock(context.Background())
+	require.NoError(t, err)
+
+	// After Lock, oldKey bytes should be zeroed.
+	for i, b := range oldCopy {
+		if oldKey[i] != 0 {
+			t.Fatalf("cacheKey byte %d not zeroed: got %d", i, b)
+		}
+	}
+
+	svc.mu.Lock()
+	require.Nil(t, svc.cacheKey, "cacheKey should be nil after Lock")
+	svc.mu.Unlock()
 }
 
 // ---------------------------------------------------------------------------

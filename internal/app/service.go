@@ -107,12 +107,12 @@ func (s *Service) Unlock(ctx context.Context, email, password string) (retErr er
 		s.emit(IndexReady, "search index ready")
 	}
 
-	// Start background sync worker.
-	ctx, cancel := context.WithCancel(ctx)
+	// Start background sync worker rooted at context.Background().
+	workerCtx, cancel := context.WithCancel(context.Background())
 	s.cancelWorkers = cancel
 	s.emit(Unlocking, "starting sync worker")
 
-	s.startMinimalSyncWorker(ctx)
+	s.startMinimalSyncWorker(workerCtx)
 
 	return nil
 }
@@ -170,6 +170,18 @@ func (s *Service) loadCacheData(ctx context.Context, key []byte) (items []vault.
 		}
 	}
 
+	// Deduplicate outbox mutations by ID, preserving first occurrence.
+	seen := make(map[string]struct{}, len(outbox))
+	deduped := outbox[:0]
+	for _, m := range outbox {
+		if _, ok := seen[m.ID]; ok {
+			continue
+		}
+		seen[m.ID] = struct{}{}
+		deduped = append(deduped, m)
+	}
+	outbox = deduped
+
 	return items, folders, outbox, true, nil
 }
 
@@ -187,8 +199,8 @@ func (s *Service) Lock(ctx context.Context) error {
 	// Increment lifecycle to invalidate any in-flight unlock.
 	s.lifecycle++
 
-	// Clear cache key.
-	s.cacheKey = nil
+	// Clear cache key (zeroize before dropping).
+	s.zeroCacheKeyLocked()
 
 	// Clear pending remote state.
 	s.pendingRemoteItems = nil
@@ -287,7 +299,7 @@ func (s *Service) Shutdown(ctx context.Context) error {
 	s.conflicts = nil
 	s.pendingRemoteItems = nil
 	s.pendingRemoteFolders = nil
-	s.cacheKey = nil
+	s.zeroCacheKeyLocked()
 	s.state = auth.LockStateLocked
 	s.mu.Unlock()
 
@@ -324,6 +336,17 @@ func (s *Service) now() time.Time {
 // The caller must hold s.mu.
 func (s *Service) rebuildIndexLocked() {
 	s.index = vault.BuildIndex(s.items)
+}
+
+// zeroCacheKeyLocked zeroes the cacheKey slice and sets it to nil.
+// The caller must hold s.mu.
+func (s *Service) zeroCacheKeyLocked() {
+	if s.cacheKey != nil {
+		for i := range s.cacheKey {
+			s.cacheKey[i] = 0
+		}
+		s.cacheKey = nil
+	}
 }
 
 // appendOutboxLocked appends a mutation to the outbox and returns it.
@@ -426,7 +449,10 @@ func (s *Service) Create(ctx context.Context, item vault.Item) (vault.Item, erro
 	item.SyncStatus = vault.SyncStatusPending
 	item.RevisionDate = s.now()
 
-	payload, _ := json.Marshal(item)
+	payload, err := json.Marshal(item)
+	if err != nil {
+		return vault.Item{}, fmt.Errorf("app: marshal create payload: %w", err)
+	}
 	s.appendOutboxLocked(coresync.MutationCreate, item.ID, payload)
 
 	s.items = append(s.items, item)
@@ -477,7 +503,10 @@ func (s *Service) Update(ctx context.Context, id string, item vault.Item) (vault
 	item.SyncStatus = vault.SyncStatusPending
 	item.RevisionDate = s.now()
 
-	payload, _ := json.Marshal(item)
+	payload, err := json.Marshal(item)
+	if err != nil {
+		return vault.Item{}, fmt.Errorf("app: marshal update payload: %w", err)
+	}
 	s.appendOutboxLocked(coresync.MutationUpdate, id, payload)
 
 	found := false
@@ -533,7 +562,10 @@ func (s *Service) Trash(ctx context.Context, id string) error {
 		return err
 	}
 
-	payload, _ := json.Marshal(map[string]string{"id": id})
+	payload, err := json.Marshal(map[string]string{"id": id})
+	if err != nil {
+		return fmt.Errorf("app: marshal trash payload: %w", err)
+	}
 	s.appendOutboxLocked(coresync.MutationTrash, id, payload)
 
 	for i, existing := range s.items {
@@ -587,7 +619,10 @@ func (s *Service) Restore(ctx context.Context, id string) (vault.Item, error) {
 		return vault.Item{}, err
 	}
 
-	payload, _ := json.Marshal(map[string]string{"id": id})
+	payload, err := json.Marshal(map[string]string{"id": id})
+	if err != nil {
+		return vault.Item{}, fmt.Errorf("app: marshal restore payload: %w", err)
+	}
 	s.appendOutboxLocked(coresync.MutationRestore, id, payload)
 
 	var restored vault.Item
@@ -641,7 +676,10 @@ func (s *Service) Delete(ctx context.Context, id string) error {
 		return err
 	}
 
-	payload, _ := json.Marshal(map[string]string{"id": id})
+	payload, err := json.Marshal(map[string]string{"id": id})
+	if err != nil {
+		return fmt.Errorf("app: marshal delete payload: %w", err)
+	}
 	s.appendOutboxLocked(coresync.MutationDelete, id, payload)
 
 	for i, existing := range s.items {
@@ -780,7 +818,10 @@ func (s *Service) ResolveConflict(ctx context.Context, conflictID string, resolu
 			dup.ConflictID = ""
 			s.items = append(s.items, dup)
 
-			payload, _ := json.Marshal(dup)
+			payload, err := json.Marshal(dup)
+			if err != nil {
+				return fmt.Errorf("app: marshal duplicate payload: %w", err)
+			}
 			s.outbox = append(s.outbox, coresync.OutboxMutation{
 				ID:        fmt.Sprintf("m-%d", s.now().UnixNano()),
 				Kind:      coresync.MutationCreate,

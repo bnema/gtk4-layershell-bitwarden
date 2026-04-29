@@ -16,6 +16,7 @@ type Snapshot struct {
 type PlainSnapshot struct {
 	AccountHash  string
 	LastRevision string
+	SavedAt      time.Time
 	ItemsJSON    []byte
 	FoldersJSON  []byte
 	OutboxJSON   []byte

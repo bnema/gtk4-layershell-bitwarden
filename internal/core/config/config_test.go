@@ -111,6 +111,44 @@ func TestAcceptSelfHostedURL(t *testing.T) {
 	}
 }
 
+func TestRejectSelfHostedURLWithUserinfo(t *testing.T) {
+	cfg := Default()
+	cfg.Bitwarden.Email = "test@example.com"
+	cfg.Bitwarden.Region = RegionSelfHosted
+	cfg.Bitwarden.ServerURL = "https://user:pass@vault.example.com"
+
+	if err := Validate(cfg); err != ErrInvalidServerURL {
+		t.Errorf("expected ErrInvalidServerURL for URL with userinfo, got %v", err)
+	}
+}
+
+func TestRejectSelfHostedURLWithFragment(t *testing.T) {
+	cfg := Default()
+	cfg.Bitwarden.Email = "test@example.com"
+	cfg.Bitwarden.Region = RegionSelfHosted
+	cfg.Bitwarden.ServerURL = "https://vault.example.com#section"
+
+	if err := Validate(cfg); err != ErrInvalidServerURL {
+		t.Errorf("expected ErrInvalidServerURL for URL with fragment, got %v", err)
+	}
+}
+
+func TestValidateNilConfig(t *testing.T) {
+	if err := Validate(nil); err != ErrNilConfig {
+		t.Errorf("expected ErrNilConfig, got %v", err)
+	}
+}
+
+func TestValidateAllNilConfig(t *testing.T) {
+	errs := ValidateAll(nil)
+	if len(errs) != 1 {
+		t.Fatalf("expected 1 error, got %d: %v", len(errs), errs)
+	}
+	if errs[0] != ErrNilConfig {
+		t.Errorf("expected ErrNilConfig, got %v", errs[0])
+	}
+}
+
 func TestAcceptPrimaryActionCopyPassword(t *testing.T) {
 	cfg := Default()
 	cfg.Bitwarden.Email = "test@example.com"

@@ -78,6 +78,7 @@ type Cache struct {
 }
 
 var (
+	ErrNilConfig            = errors.New("config: config is nil")
 	ErrEmailRequired        = errors.New("config: email is required")
 	ErrInvalidRegion        = errors.New("config: region must be us, eu, or self_hosted")
 	ErrInvalidServerURL     = errors.New("config: self_hosted server_url must be an absolute https URL")
@@ -118,6 +119,9 @@ func Default() *Config {
 }
 
 func Validate(cfg *Config) error {
+	if cfg == nil {
+		return ErrNilConfig
+	}
 	errs := ValidateAll(cfg)
 	if len(errs) == 0 {
 		return nil
@@ -127,6 +131,9 @@ func Validate(cfg *Config) error {
 
 // ValidateAll returns a slice of all validation errors found.
 func ValidateAll(cfg *Config) []error {
+	if cfg == nil {
+		return []error{ErrNilConfig}
+	}
 	var errs []error
 	if cfg.Bitwarden.Email == "" {
 		errs = append(errs, ErrEmailRequired)

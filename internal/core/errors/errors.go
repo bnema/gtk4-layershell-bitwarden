@@ -46,12 +46,16 @@ func (e *Error) Is(target error) bool {
 	if !errors.As(target, &other) || e == nil || other == nil {
 		return false
 	}
-	return other.Kind != "" && e.Kind == other.Kind
+	if e.Kind == "" || other.Kind == "" {
+		return false
+	}
+	return e.Kind == other.Kind
 }
 
 var (
-	ErrLocked      = &Error{Kind: KindLocked}
-	ErrConflict    = &Error{Kind: KindConflict}
-	ErrNotFound    = &Error{Kind: KindNotFound}
-	ErrUnsupported = &Error{Kind: KindUnsupported}
+	ErrLocked          = &Error{Kind: KindLocked}
+	ErrConflict        = &Error{Kind: KindConflict}
+	ErrNotFound        = &Error{Kind: KindNotFound}
+	ErrUnsupported     = &Error{Kind: KindUnsupported}
+	ErrUnauthenticated = &Error{Kind: KindUnauthenticated}
 )
