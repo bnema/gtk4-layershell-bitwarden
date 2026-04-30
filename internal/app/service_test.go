@@ -2075,11 +2075,6 @@ func TestLoginRequiresPINBeforeRemoteLogin(t *testing.T) {
 	fr.mu.Unlock()
 }
 
-// realClock is a minimal out.Clock that delegates to time.Now.
-type realClock struct{}
-
-func (realClock) Now() time.Time { return time.Now() }
-
 // ---------------------------------------------------------------------------
 // UnlockWithPIN tests
 // ---------------------------------------------------------------------------
