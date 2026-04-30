@@ -3,11 +3,15 @@
 // compile under any build tag.
 package omnibox
 
+import "github.com/bnema/gtk4-layershell-bitwarden/internal/core/session"
+
 // Mode represents the current view mode of the omnibox.
 type Mode int
 
 const (
 	ModeUnlock Mode = iota
+	ModePINUnlock
+	ModeKeyringError
 	ModeSearch
 	ModeDetail
 	ModeForm
@@ -107,7 +111,7 @@ func (s *State) OpenDetail() {
 }
 
 // Back transitions to ModeSearch from ModeDetail or ModeForm.
-// From ModeUnlock, Back transitions to ModeSearch (already unlocked path).
+// From unlock/keyring modes Back is a no-op (caller can use Escape to quit).
 // From ModeSearch, Back is a no-op (caller can use it to close).
 func (s *State) Back() {
 	switch s.Mode {
@@ -116,10 +120,29 @@ func (s *State) Back() {
 	case ModeDetail, ModeForm:
 		s.Mode = ModeSearch
 		s.DetailID = ""
-	case ModeUnlock:
-		// Can't go back from unlock; caller should ignore.
+	case ModeUnlock, ModePINUnlock, ModeKeyringError:
+		// Can't go back from unlock/keyring error; caller should ignore.
 	default:
 		s.Mode = ModeSearch
+	}
+}
+
+// ModeForAuthStatus returns the appropriate initial mode given the auth status
+// and whether an email is configured. It is a pure function suitable for testing.
+func ModeForAuthStatus(status session.AuthStatus, hasEmail bool) Mode {
+	switch status {
+	case session.KeyringUnavailable:
+		return ModeKeyringError
+	case session.LoggedInUnlockAvailable:
+		if hasEmail {
+			return ModePINUnlock
+		}
+		return ModeUnlock
+	case session.LoggedInLocked:
+		return ModeUnlock
+	default:
+		// Unauthenticated or any other status.
+		return ModeUnlock
 	}
 }
 

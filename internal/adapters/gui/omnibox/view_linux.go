@@ -72,7 +72,8 @@ func (v *View) resetDynamicCallbacks() {
 	v.dynamicHandlers = nil
 }
 
-// New creates a new View, builds all GTK widgets, and starts the event listener.
+// New creates a new View, builds all GTK widgets, queries auth status to choose
+// the initial mode, and starts the event listener.
 func New(ctx context.Context, service in.AppService, quit func(), retainFn func(interface{})) *View {
 	v := &View{
 		service: service,
@@ -83,6 +84,30 @@ func New(ctx context.Context, service in.AppService, quit func(), retainFn func(
 
 	v.buildUI()
 	v.showUnlock()
+
+	// Determine initial mode from configured email and auth status.
+	email := ""
+	if cfg := v.service.Config(); cfg != nil {
+		email = cfg.Bitwarden.Email
+	}
+	if email != "" {
+		status, err := v.service.AuthStatus(ctx, email)
+		if err != nil {
+			v.showError(err.Error())
+		} else {
+			mode := ModeForAuthStatus(status, true)
+			v.mu.Lock()
+			v.state.Mode = mode
+			v.mu.Unlock()
+			switch mode {
+			case ModePINUnlock:
+				placeholderPIN := "Local unlock PIN"
+				v.passwordEntry.SetPlaceholderText(&placeholderPIN)
+			case ModeKeyringError:
+				v.showError("Secret Service is required")
+			}
+		}
+	}
 
 	// Subscribe to service events.
 	go v.eventLoop(ctx)
@@ -121,9 +146,18 @@ func (v *View) buildUI() {
 	v.errorLabel.SetVisible(false)
 	v.unlockBox.Append(&v.errorLabel.Widget)
 
-	// Unlock action on password Enter.
+	// Unlock action on password/PIN Enter — behaviour depends on current mode.
 	activateCb := func(_ gtklib.Entry) {
-		v.doUnlock(context.Background())
+		v.mu.Lock()
+		mode := v.state.Mode
+		v.mu.Unlock()
+		switch mode {
+		case ModeUnlock:
+			v.doUnlock(context.Background())
+		case ModePINUnlock:
+			v.doPINUnlock(context.Background())
+			// ModeKeyringError: no-op on enter.
+		}
 	}
 	v.retain(activateCb)
 	v.passwordEntry.ConnectActivate(&activateCb)
@@ -298,7 +332,7 @@ func (v *View) AttachKeyController(window *gtklib.Window) {
 		}
 
 		switch mode {
-		case ModeUnlock:
+		case ModeUnlock, ModePINUnlock, ModeKeyringError:
 			return handleUnlock()
 		case ModeSearch:
 			return handleSearch()
@@ -322,7 +356,7 @@ func (v *View) GrabFocus() {
 	defer v.mu.Unlock()
 
 	switch v.state.Mode {
-	case ModeUnlock:
+	case ModeUnlock, ModePINUnlock, ModeKeyringError:
 		if v.emailEntry.GetText() == "" {
 			v.emailEntry.GrabFocus()
 		} else {
@@ -368,6 +402,49 @@ func (v *View) doUnlock(ctx context.Context) {
 		}
 
 		// Check context cancellation before scheduling UI updates.
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+
+		idleAddOnce(func() {
+			v.passwordEntry.SetText("")
+
+			v.mu.Lock()
+			v.state.Mode = ModeSearch
+			v.state.Error = ""
+			v.unlockBox.SetVisible(false)
+			v.searchBox.SetVisible(true)
+			v.detailBox.SetVisible(false)
+			v.formBox.SetVisible(false)
+			v.mu.Unlock()
+
+			v.searchEntry.GrabFocus()
+			v.loadAllItems()
+		})
+	}()
+}
+
+// doPINUnlock runs the PIN unlock flow.
+func (v *View) doPINUnlock(ctx context.Context) {
+	email := v.emailEntry.GetText()
+	pin := v.passwordEntry.GetText()
+
+	if email == "" || pin == "" {
+		v.showError("Email and PIN are required")
+		return
+	}
+
+	v.showError("")
+
+	go func() {
+		unlockErr := v.service.UnlockWithPIN(ctx, email, pin)
+		if unlockErr != nil {
+			v.showError(unlockErr.Error())
+			return
+		}
+
 		select {
 		case <-ctx.Done():
 			return
@@ -532,7 +609,7 @@ func (v *View) render() {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 
-	v.unlockBox.SetVisible(v.state.Mode == ModeUnlock)
+	v.unlockBox.SetVisible(v.state.Mode == ModeUnlock || v.state.Mode == ModePINUnlock || v.state.Mode == ModeKeyringError)
 	v.searchBox.SetVisible(v.state.Mode == ModeSearch)
 	v.detailBox.SetVisible(v.state.Mode == ModeDetail)
 	v.formBox.SetVisible(v.state.Mode == ModeForm)
