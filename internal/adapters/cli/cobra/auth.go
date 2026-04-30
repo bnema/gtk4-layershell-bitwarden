@@ -15,6 +15,7 @@ import (
 	viperadapter "github.com/bnema/gtk4-layershell-bitwarden/internal/adapters/config/viper"
 	coreauth "github.com/bnema/gtk4-layershell-bitwarden/internal/core/auth"
 	coreconfig "github.com/bnema/gtk4-layershell-bitwarden/internal/core/config"
+	"github.com/bnema/gtk4-layershell-bitwarden/internal/core/session"
 	"github.com/bnema/gtk4-layershell-bitwarden/internal/ports/in"
 )
 
@@ -340,7 +341,7 @@ func waitForInitialSync(ctx context.Context, events <-chan in.Event, timeout tim
 	}
 }
 
-func newStatusCmd(opts Options, cachePath string) *cobra.Command {
+func newStatusCmd(opts Options, cachePath, outboxPath string) *cobra.Command {
 	return &cobra.Command{
 		Use:   "status",
 		Short: "Show authentication status",
@@ -351,18 +352,35 @@ func newStatusCmd(opts Options, cachePath string) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			status := statusResponse{
+
+			email := cfg.Bitwarden.Email
+			resp := statusResponse{
 				ServerURL: effectiveServerURL(cfg),
-				UserEmail: cfg.Bitwarden.Email,
-				Status:    "unauthenticated",
+				UserEmail: email,
+				Status:    string(session.Unauthenticated),
 			}
-			if cfg.Bitwarden.Email != "" {
-				status.Status = "locked"
+
+			// Retrieve AuthStatus from the composed service when an email is configured.
+			if email != "" {
+				svc, serr := composeAppService(opts, cmd.Context(), cfg, cachePath, outboxPath)
+				if serr != nil {
+					return fmt.Errorf("compose service: %w", serr)
+				}
+				defer func() { _ = svc.Shutdown(context.Background()) }()
+
+				statusStr, aerr := svc.AuthStatus(cmd.Context(), email)
+				if aerr != nil && statusStr == "" {
+					return aerr
+				}
+				resp.Status = string(statusStr)
 			}
-			if info, err := os.Stat(cachePath); err == nil {
-				status.LastSync = info.ModTime().UTC().Format(time.RFC3339)
+
+			// LastSync derived from cache file mtime.
+			if info, serr := os.Stat(cachePath); serr == nil {
+				resp.LastSync = info.ModTime().UTC().Format(time.RFC3339)
 			}
-			data, err := json.MarshalIndent(status, "", "  ")
+
+			data, err := json.MarshalIndent(resp, "", "  ")
 			if err != nil {
 				return err
 			}

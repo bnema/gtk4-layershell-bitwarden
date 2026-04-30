@@ -14,6 +14,7 @@ import (
 
 	coreauth "github.com/bnema/gtk4-layershell-bitwarden/internal/core/auth"
 	coreconfig "github.com/bnema/gtk4-layershell-bitwarden/internal/core/config"
+	cerrors "github.com/bnema/gtk4-layershell-bitwarden/internal/core/errors"
 	"github.com/bnema/gtk4-layershell-bitwarden/internal/core/session"
 	coresync "github.com/bnema/gtk4-layershell-bitwarden/internal/core/sync"
 	"github.com/bnema/gtk4-layershell-bitwarden/internal/core/vault"
@@ -27,10 +28,13 @@ type fakeAuthService struct {
 	requireTwoFactor bool
 	twoFactorCode    string
 	events           chan in.Event
+	authStatus       session.AuthStatus
+	authStatusErr    error
+	loginErr         error
 }
 
 func newFakeAuthService() *fakeAuthService {
-	return &fakeAuthService{events: make(chan in.Event, 4)}
+	return &fakeAuthService{events: make(chan in.Event, 4), authStatus: session.Unauthenticated}
 }
 
 func (f *fakeAuthService) Login(_ context.Context, input coreauth.LoginInput) error {
@@ -43,6 +47,9 @@ func (f *fakeAuthService) Login(_ context.Context, input coreauth.LoginInput) er
 			return err
 		}
 		f.twoFactorCode = code
+	}
+	if f.loginErr != nil {
+		return f.loginErr
 	}
 	return nil
 }
@@ -99,7 +106,7 @@ func (f *fakeAuthService) Shutdown(context.Context) error {
 	return nil
 }
 func (f *fakeAuthService) AuthStatus(_ context.Context, _ string) (session.AuthStatus, error) {
-	return session.Unauthenticated, nil
+	return f.authStatus, f.authStatusErr
 }
 
 func TestLoginDoesNotPrintBWSessionAndRequiresPIN(t *testing.T) {
@@ -248,7 +255,14 @@ func TestUnlockUsesConfiguredEmail(t *testing.T) {
 func TestStatusReportsLockedWhenEmailConfigured(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.toml")
-	opts := Options{ConfigPath: configPath}
+	fake := newFakeAuthService()
+	fake.authStatus = session.LoggedInLocked
+	opts := Options{
+		ConfigPath: configPath,
+		ComposeService: func(context.Context, *coreconfig.Config, string, string) (in.AppService, error) {
+			return fake, nil
+		},
+	}
 
 	_, err := executeCmd(t, opts, []string{"config", "set", "bitwarden.email", "me@example.com"})
 	require.NoError(t, err)
@@ -256,10 +270,100 @@ func TestStatusReportsLockedWhenEmailConfigured(t *testing.T) {
 	out, err := executeCmd(t, opts, []string{"status"})
 	require.NoError(t, err)
 
-	var status statusResponse
-	require.NoError(t, json.Unmarshal([]byte(out), &status))
-	require.Equal(t, "me@example.com", status.UserEmail)
-	require.Equal(t, "locked", status.Status)
+	var resp statusResponse
+	require.NoError(t, json.Unmarshal([]byte(out), &resp))
+	require.Equal(t, "me@example.com", resp.UserEmail)
+	require.Equal(t, string(session.LoggedInLocked), resp.Status)
+}
+
+func TestStatusReportsAuthStatusFromService(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.toml")
+	fake := newFakeAuthService()
+	fake.authStatus = session.LoggedInUnlockAvailable
+	opts := Options{
+		ConfigPath: configPath,
+		ComposeService: func(context.Context, *coreconfig.Config, string, string) (in.AppService, error) {
+			return fake, nil
+		},
+	}
+
+	_, err := executeCmd(t, opts, []string{"config", "set", "bitwarden.email", "me@example.com"})
+	require.NoError(t, err)
+
+	out, err := executeCmd(t, opts, []string{"status"})
+	require.NoError(t, err)
+
+	var resp statusResponse
+	require.NoError(t, json.Unmarshal([]byte(out), &resp))
+	require.Equal(t, "me@example.com", resp.UserEmail)
+	require.Equal(t, string(session.LoggedInUnlockAvailable), resp.Status)
+}
+
+func TestStatusReportsKeyringUnavailable(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.toml")
+	fake := newFakeAuthService()
+	fake.authStatus = session.KeyringUnavailable
+	fake.authStatusErr = errors.New("keyring unavailable")
+	opts := Options{
+		ConfigPath: configPath,
+		ComposeService: func(context.Context, *coreconfig.Config, string, string) (in.AppService, error) {
+			return fake, nil
+		},
+	}
+
+	_, err := executeCmd(t, opts, []string{"config", "set", "bitwarden.email", "me@example.com"})
+	require.NoError(t, err)
+
+	out, err := executeCmd(t, opts, []string{"status"})
+	require.NoError(t, err)
+
+	var resp statusResponse
+	require.NoError(t, json.Unmarshal([]byte(out), &resp))
+	require.Equal(t, "me@example.com", resp.UserEmail)
+	require.Equal(t, string(session.KeyringUnavailable), resp.Status)
+}
+
+func TestLoginFailsOnKeyringUnavailable(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.toml")
+	// Fake that Login returns a keyring-unavailable-style error.
+	fake := &fakeAuthService{
+		events:     make(chan in.Event, 4),
+		authStatus: session.KeyringUnavailable,
+		authStatusErr: &cerrors.Error{
+			Kind:    cerrors.KindValidation,
+			Op:      "credentials.CheckAvailable",
+			Message: "secret service not available",
+		},
+	}
+	// Override Login to return the keyring error.
+	fakeLoginErr := errors.New("credentials.CheckAvailable: secret service not available")
+	fake.loginErr = fakeLoginErr
+	opts := Options{
+		ConfigPath: configPath,
+		ComposeService: func(context.Context, *coreconfig.Config, string, string) (in.AppService, error) {
+			return fake, nil
+		},
+	}
+
+	stdin := strings.NewReader("1234\n")
+	root := NewRootCommand(opts)
+	root.SetArgs([]string{"login", "me@example.com", "master-password", "--raw", "--no-sync", "--region", "us"})
+	root.SetIn(stdin)
+	out := new(bytes.Buffer)
+	root.SetOut(out)
+	root.SetErr(new(bytes.Buffer))
+
+	err := root.ExecuteContext(context.Background())
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "secret service not available")
+
+	// Output should NOT contain "login ok" or BW_SESSION.
+	output := out.String()
+	require.NotContains(t, output, "login ok", "output must not contain login ok")
+	require.NotContains(t, output, "BW_SESSION", "output must not contain BW_SESSION")
 }
 
 func TestLayerShellUnavailableSuggestsCLIAuth(t *testing.T) {

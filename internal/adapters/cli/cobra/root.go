@@ -16,6 +16,9 @@ import (
 	loggeradapter "github.com/bnema/gtk4-layershell-bitwarden/internal/adapters/logging"
 	"github.com/bnema/gtk4-layershell-bitwarden/internal/adapters/paths/xdg"
 	remoteadapter "github.com/bnema/gtk4-layershell-bitwarden/internal/adapters/remote/bitwarden"
+	keyring "github.com/bnema/gtk4-layershell-bitwarden/internal/adapters/secrets/keyring"
+	"github.com/bnema/gtk4-layershell-bitwarden/internal/adapters/session/bootid"
+	"github.com/bnema/gtk4-layershell-bitwarden/internal/adapters/session/pinenvelope"
 	"github.com/bnema/gtk4-layershell-bitwarden/internal/app"
 	coreconfig "github.com/bnema/gtk4-layershell-bitwarden/internal/core/config"
 	"github.com/bnema/gtk4-layershell-bitwarden/internal/ports/in"
@@ -94,7 +97,7 @@ func NewRootCommand(opts Options) *cobra.Command {
 	root.AddCommand(newConfigCmd(opts))
 	root.AddCommand(newLoginCmd(opts, cachePath, outboxPath))
 	root.AddCommand(newUnlockCmd(opts, cachePath, outboxPath))
-	root.AddCommand(newStatusCmd(opts, cachePath))
+	root.AddCommand(newStatusCmd(opts, cachePath, outboxPath))
 	root.AddCommand(newLockCmd())
 	root.AddCommand(newCacheCmd(cachePath, outboxPath))
 	root.AddCommand(newLogoutCmd(cachePath, outboxPath))
@@ -133,14 +136,22 @@ func composeService(ctx context.Context, cfg *coreconfig.Config, cachePath, outb
 		return nil, fmt.Errorf("remote client: %w", err)
 	}
 
+	// Session infrastructure: OS keyring, boot ID, PIN envelope.
+	credentials := keyring.New()
+	bootID := bootid.New()
+	pinEnvelope := pinenvelope.New(pinenvelope.ServiceConfig{})
+
 	// Application service.
 	svc := app.NewService(app.Deps{
-		Remote:    remote,
-		Cache:     cacheStore,
-		Outbox:    outboxStore,
-		SecretBox: box,
-		Logger:    logger,
-		Config:    cfg,
+		Remote:      remote,
+		Cache:       cacheStore,
+		Outbox:      outboxStore,
+		SecretBox:   box,
+		Logger:      logger,
+		Config:      cfg,
+		Credentials: credentials,
+		BootID:      bootID,
+		PINEnvelope: pinEnvelope,
 		// Clock can be nil; service falls back to time.Now.
 	})
 
