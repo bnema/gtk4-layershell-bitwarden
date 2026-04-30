@@ -300,12 +300,10 @@ func (s *Service) UnlockWithPIN(ctx context.Context, email, pin string) (retErr 
 	copy(s.cacheKey, material.CacheKey)
 	s.state = auth.LockStateUnlocked
 
-	// Start background sync worker.
-	workerCtx, cancel := context.WithCancel(context.Background())
-	s.cancelWorkers = cancel
-	s.emit(Unlocking, "starting sync worker")
-	s.startMinimalSyncWorker(workerCtx)
-
+	// PIN unlock intentionally avoids background sync to prevent resident
+	// vault plaintext (s.items/s.folders) in memory for the session lifetime.
+	// Sync can be added later with operation-scoped persistence that does not
+	// pin plaintext to the resident Service state.
 	return nil
 }
 

@@ -2764,6 +2764,72 @@ func TestUnlockWithPINRequiresDeps(t *testing.T) {
 	})
 }
 
+func TestUnlockWithPINDoesNotStartSyncWorker(t *testing.T) {
+	email := "user@example.com"
+	pin := "1234"
+	ref := session.AccountRef{Email: email, ServerURL: "https://vault.bitwarden.com"}
+	bootID := "boot-abc"
+
+	validBundle := session.TokenBundle{
+		AccountID:    "acct-1",
+		Email:        ref.Email,
+		ServerURL:    ref.ServerURL,
+		AccessToken:  []byte("at"),
+		RefreshToken: []byte("rt"),
+		TokenType:    "Bearer",
+		ExpiresAt:    time.Now().Add(time.Hour),
+	}
+
+	envelope := session.UnlockEnvelope{
+		Version:        session.UnlockEnvelopeVersion,
+		Account:        ref,
+		AccountID:      "acct-1",
+		BootID:         bootID,
+		ExpiresAt:      time.Now().Add(time.Hour),
+		FailedAttempts: 0,
+		PINMaxFailures: 5,
+	}
+
+	material := session.UnlockMaterial{
+		CacheKey: []byte("cache-key-from-material"),
+		UserKey:  []byte("user-key"),
+	}
+
+	cs := &fakeCredentialStore{
+		tokenBundle: validBundle,
+		envelope:    envelope,
+	}
+	pe := &fakePINEnvelope{
+		openMaterial: material,
+		openUpdated:  envelope.Clone(),
+		openErr:      nil,
+	}
+	boot := &fakeBootID{id: bootID}
+	fr := &fakeRemote{}
+
+	cfg := coreconfig.Default()
+	cfg.Bitwarden.Email = email
+
+	svc := NewService(Deps{
+		Config:      cfg,
+		Remote:      fr,
+		Credentials: cs,
+		BootID:      boot,
+		PINEnvelope: pe,
+	})
+
+	err := svc.UnlockWithPIN(context.Background(), email, pin)
+	require.NoError(t, err)
+
+	// Sync must never be called — PIN unlock intentionally avoids background sync.
+	require.Equal(t, int32(0), fr.syncCalled.Load(), "sync should not be started by UnlockWithPIN")
+
+	// cancelWorkers must be nil since no worker goroutine was started.
+	svc.mu.Lock()
+	require.Nil(t, svc.cancelWorkers, "cancelWorkers should be nil after UnlockWithPIN")
+	svc.mu.Unlock()
+}
+
 // ---------------------------------------------------------------------------
 // Bounded plaintext vault read tests
 // ---------------------------------------------------------------------------
