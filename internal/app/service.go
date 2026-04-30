@@ -245,12 +245,18 @@ func (s *Service) UnlockWithPIN(ctx context.Context, email, pin string) (retErr 
 
 		if countersChanged {
 			if opened.ShouldDeleteAfterFailures() {
-				_ = s.deps.Credentials.DeleteUnlockEnvelope(ctx, ref)
+				if delErr := s.deps.Credentials.DeleteUnlockEnvelope(ctx, ref); delErr != nil {
+					s.mu.Lock()
+					s.state = auth.LockStateLocked
+					s.mu.Unlock()
+					return fmt.Errorf("app: unlock-pin: delete envelope after max failures: %w", delErr)
+				}
 			} else {
 				if saveErr := s.deps.Credentials.SaveUnlockEnvelope(ctx, ref, opened); saveErr != nil {
-					if s.deps.Logger != nil {
-						s.deps.Logger.Error("app: unlock-pin: save failed-envelope failed", "error", saveErr)
-					}
+					s.mu.Lock()
+					s.state = auth.LockStateLocked
+					s.mu.Unlock()
+					return fmt.Errorf("app: unlock-pin: save updated envelope after wrong PIN: %w", saveErr)
 				}
 			}
 		}
@@ -265,9 +271,10 @@ func (s *Service) UnlockWithPIN(ctx context.Context, email, pin string) (retErr 
 	// 8. Save updated envelope if failure counters changed (reset after success).
 	if opened.FailedAttempts != envelope.FailedAttempts || opened.BackoffUntil != envelope.BackoffUntil {
 		if saveErr := s.deps.Credentials.SaveUnlockEnvelope(ctx, ref, opened); saveErr != nil {
-			if s.deps.Logger != nil {
-				s.deps.Logger.Error("app: unlock-pin: save reset-envelope failed", "error", saveErr)
-			}
+			s.mu.Lock()
+			s.state = auth.LockStateLocked
+			s.mu.Unlock()
+			return fmt.Errorf("app: unlock-pin: save reset envelope after success: %w", saveErr)
 		}
 	}
 
@@ -822,10 +829,12 @@ func (s *Service) now() time.Time {
 	return time.Now()
 }
 
-// rebuildIndexLocked rebuilds the search index from the current items slice.
-// The caller must hold s.mu.
+// rebuildIndexLocked clears the resident search index. Callers invoke it
+// after mutation/sync changes; search, items, and get build transient local
+// indexes per call to avoid retaining plaintext in memory. The caller must
+// hold s.mu.
 func (s *Service) rebuildIndexLocked() {
-	s.index = vault.BuildIndex(s.items)
+	s.index = nil
 }
 
 // zeroCacheKeyLocked zeroes the cacheKey slice and sets it to nil.

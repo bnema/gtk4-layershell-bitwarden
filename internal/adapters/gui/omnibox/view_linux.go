@@ -12,6 +12,7 @@ import (
 	gobject "github.com/bnema/puregotk/v4/gobject"
 	gtklib "github.com/bnema/puregotk/v4/gtk"
 
+	"github.com/bnema/gtk4-layershell-bitwarden/internal/core/session"
 	"github.com/bnema/gtk4-layershell-bitwarden/internal/core/vault"
 	"github.com/bnema/gtk4-layershell-bitwarden/internal/ports/in"
 )
@@ -92,13 +93,17 @@ func New(ctx context.Context, service in.AppService, quit func(), retainFn func(
 	}
 	if email != "" {
 		status, err := v.service.AuthStatus(ctx, email)
+		mode := ModeForAuthStatus(status, true)
+		v.mu.Lock()
+		v.state.Mode = mode
+		v.mu.Unlock()
 		if err != nil {
-			v.showError(err.Error())
+			if status == session.KeyringUnavailable {
+				v.showError("Secret Service is required")
+			} else {
+				v.showError(err.Error())
+			}
 		} else {
-			mode := ModeForAuthStatus(status, true)
-			v.mu.Lock()
-			v.state.Mode = mode
-			v.mu.Unlock()
 			switch mode {
 			case ModePINUnlock:
 				placeholderPIN := "Local unlock PIN"

@@ -409,7 +409,9 @@ type fakeCredentialStore struct {
 	loadEnvelopeErr     error
 	loadEnvCalls        int
 	saveEnvCalled       int
+	saveEnvelopeErr     error
 	delEnvCalls         int
+	deleteEnvelopeErr   error
 }
 
 func (cs *fakeCredentialStore) CheckAvailable(_ context.Context) error {
@@ -446,7 +448,7 @@ func (cs *fakeCredentialStore) SaveUnlockEnvelope(_ context.Context, _ session.A
 	defer cs.mu.Unlock()
 	cs.saveEnvCalled++
 	cs.savedUnlockEnvelope = env
-	return nil
+	return cs.saveEnvelopeErr
 }
 
 func (cs *fakeCredentialStore) LoadUnlockEnvelope(_ context.Context, _ session.AccountRef) (session.UnlockEnvelope, error) {
@@ -460,7 +462,7 @@ func (cs *fakeCredentialStore) DeleteUnlockEnvelope(_ context.Context, _ session
 	cs.mu.Lock()
 	defer cs.mu.Unlock()
 	cs.delEnvCalls++
-	return nil
+	return cs.deleteEnvelopeErr
 }
 
 // ---------------------------------------------------------------------------
@@ -2295,6 +2297,228 @@ func TestUnlockWithPINDeletesEnvelopeAfterMaxFailures(t *testing.T) {
 	// Should NOT be saved.
 	require.Equal(t, 0, cs.saveEnvCalled)
 	cs.mu.Unlock()
+}
+
+func TestUnlockWithPINWrongPINSaveErrorKeepsLocked(t *testing.T) {
+	email := "user@example.com"
+	pin := "wrong-pin"
+	ref := session.AccountRef{Email: email, ServerURL: "https://vault.bitwarden.com"}
+	bootID := "boot-abc"
+
+	validBundle := session.TokenBundle{
+		AccountID:    "acct-1",
+		Email:        ref.Email,
+		ServerURL:    ref.ServerURL,
+		AccessToken:  []byte("at"),
+		RefreshToken: []byte("rt"),
+		TokenType:    "Bearer",
+		ExpiresAt:    time.Now().Add(time.Hour),
+	}
+
+	envelope := session.UnlockEnvelope{
+		Version:        session.UnlockEnvelopeVersion,
+		Account:        ref,
+		AccountID:      "acct-1",
+		BootID:         bootID,
+		ExpiresAt:      time.Now().Add(time.Hour),
+		FailedAttempts: 0,
+		PINMaxFailures: 5,
+	}
+
+	// Open returns updated envelope with 1 failure and error.
+	updatedEnvelope := envelope.Clone()
+	updatedEnvelope.FailedAttempts = 1
+	updatedEnvelope.BackoffUntil = time.Now().Add(time.Second)
+
+	saveErr := fmt.Errorf("keyring write error")
+	cs := &fakeCredentialStore{
+		tokenBundle:     validBundle,
+		envelope:        envelope,
+		saveEnvelopeErr: saveErr,
+	}
+	pe := &fakePINEnvelope{
+		openUpdated: updatedEnvelope,
+		openErr:     fmt.Errorf("pinenvelope: invalid pin"),
+	}
+	boot := &fakeBootID{id: bootID}
+	fr := &fakeRemote{}
+
+	cfg := coreconfig.Default()
+	cfg.Bitwarden.Email = email
+
+	svc := NewService(Deps{
+		Config:      cfg,
+		Remote:      fr,
+		Credentials: cs,
+		BootID:      boot,
+		PINEnvelope: pe,
+	})
+
+	err := svc.UnlockWithPIN(context.Background(), email, pin)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "save updated envelope after wrong PIN")
+	require.NotContains(t, err.Error(), "invalid pin", "error should be about persistence failure, not original PIN mismatch")
+
+	// State should remain locked.
+	svc.mu.Lock()
+	require.Equal(t, auth.LockStateLocked, svc.state)
+	svc.mu.Unlock()
+
+	// RestoreSession must NOT be called.
+	fr.mu.Lock()
+	require.Equal(t, 0, fr.restoreCallCnt)
+	fr.mu.Unlock()
+}
+
+func TestUnlockWithPINMaxFailuresDeleteErrorKeepsLocked(t *testing.T) {
+	email := "user@example.com"
+	pin := "wrong-pin"
+	ref := session.AccountRef{Email: email, ServerURL: "https://vault.bitwarden.com"}
+	bootID := "boot-abc"
+
+	validBundle := session.TokenBundle{
+		AccountID:    "acct-1",
+		Email:        ref.Email,
+		ServerURL:    ref.ServerURL,
+		AccessToken:  []byte("at"),
+		RefreshToken: []byte("rt"),
+		TokenType:    "Bearer",
+		ExpiresAt:    time.Now().Add(time.Hour),
+	}
+
+	envelope := session.UnlockEnvelope{
+		Version:        session.UnlockEnvelopeVersion,
+		Account:        ref,
+		AccountID:      "acct-1",
+		BootID:         bootID,
+		ExpiresAt:      time.Now().Add(time.Hour),
+		FailedAttempts: 4,
+		PINMaxFailures: 5,
+	}
+
+	// Open returns updated envelope with 5 failures → should delete.
+	updatedEnvelope := envelope.Clone()
+	updatedEnvelope.FailedAttempts = 5
+	updatedEnvelope.BackoffUntil = time.Now().Add(time.Minute)
+
+	deleteErr := fmt.Errorf("keyring delete error")
+	cs := &fakeCredentialStore{
+		tokenBundle:       validBundle,
+		envelope:          envelope,
+		deleteEnvelopeErr: deleteErr,
+	}
+	pe := &fakePINEnvelope{
+		openUpdated: updatedEnvelope,
+		openErr:     fmt.Errorf("pinenvelope: invalid pin"),
+	}
+	boot := &fakeBootID{id: bootID}
+	fr := &fakeRemote{}
+
+	cfg := coreconfig.Default()
+	cfg.Bitwarden.Email = email
+
+	svc := NewService(Deps{
+		Config:      cfg,
+		Remote:      fr,
+		Credentials: cs,
+		BootID:      boot,
+		PINEnvelope: pe,
+	})
+
+	err := svc.UnlockWithPIN(context.Background(), email, pin)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "delete envelope after max failures")
+
+	// State should remain locked.
+	svc.mu.Lock()
+	require.Equal(t, auth.LockStateLocked, svc.state)
+	svc.mu.Unlock()
+
+	// RestoreSession must NOT be called.
+	fr.mu.Lock()
+	require.Equal(t, 0, fr.restoreCallCnt)
+	fr.mu.Unlock()
+
+	// Envelope should NOT be saved.
+	cs.mu.Lock()
+	require.Equal(t, 0, cs.saveEnvCalled)
+	cs.mu.Unlock()
+}
+
+func TestUnlockWithPINSuccessSaveErrorKeepsLocked(t *testing.T) {
+	email := "user@example.com"
+	pin := "1234"
+	ref := session.AccountRef{Email: email, ServerURL: "https://vault.bitwarden.com"}
+	bootID := "boot-abc"
+
+	validBundle := session.TokenBundle{
+		AccountID:    "acct-1",
+		Email:        ref.Email,
+		ServerURL:    ref.ServerURL,
+		AccessToken:  []byte("at"),
+		RefreshToken: []byte("rt"),
+		TokenType:    "Bearer",
+		ExpiresAt:    time.Now().Add(time.Hour),
+	}
+
+	envelope := session.UnlockEnvelope{
+		Version:        session.UnlockEnvelopeVersion,
+		Account:        ref,
+		AccountID:      "acct-1",
+		BootID:         bootID,
+		ExpiresAt:      time.Now().Add(time.Hour),
+		FailedAttempts: 2,
+		PINMaxFailures: 5,
+	}
+
+	material := session.UnlockMaterial{
+		CacheKey: []byte("cache-key"),
+		UserKey:  []byte("user-key"),
+	}
+
+	// Reset envelope after successful open.
+	resetEnvelope := envelope.Clone()
+	resetEnvelope.FailedAttempts = 0
+	resetEnvelope.BackoffUntil = time.Time{}
+
+	saveErr := fmt.Errorf("keyring write error")
+	cs := &fakeCredentialStore{
+		tokenBundle:     validBundle,
+		envelope:        envelope,
+		saveEnvelopeErr: saveErr,
+	}
+	pe := &fakePINEnvelope{
+		openMaterial: material,
+		openUpdated:  resetEnvelope,
+		openErr:      nil,
+	}
+	boot := &fakeBootID{id: bootID}
+	fr := &fakeRemote{}
+
+	cfg := coreconfig.Default()
+	cfg.Bitwarden.Email = email
+
+	svc := NewService(Deps{
+		Config:      cfg,
+		Remote:      fr,
+		Credentials: cs,
+		BootID:      boot,
+		PINEnvelope: pe,
+	})
+
+	err := svc.UnlockWithPIN(context.Background(), email, pin)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "save reset envelope after success")
+
+	// State should remain locked.
+	svc.mu.Lock()
+	require.Equal(t, auth.LockStateLocked, svc.state)
+	svc.mu.Unlock()
+
+	// RestoreSession must NOT be called (we returned before step 9).
+	fr.mu.Lock()
+	require.Equal(t, 0, fr.restoreCallCnt)
+	fr.mu.Unlock()
 }
 
 func TestUnlockWithPINExpiredOrBootChangedDoesNotRestore(t *testing.T) {
