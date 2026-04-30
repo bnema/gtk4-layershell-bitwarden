@@ -53,7 +53,7 @@ The token bundle is a server-authentication secret. It lets the app call Bitward
 
 ### Local unlock envelope
 
-Secret Service also stores a local unlock envelope per account/server. The envelope contains a cache unlock key encrypted under a key derived from the local PIN.
+Secret Service also stores a local unlock envelope per account/server. The envelope contains local unlock material encrypted under a key derived from the local PIN. Local unlock material includes the encrypted-cache key and, when remote sync without the master password is required, the Bitwarden user key needed by the SDK to decrypt synced vault data.
 
 Envelope contents:
 
@@ -64,10 +64,12 @@ Envelope contents:
 - expires at
 - PIN KDF parameters and salt
 - nonce
-- encrypted local cache unlock key
+- encrypted local unlock material containing the cache key and optional Bitwarden user key
 - optional PIN verifier metadata
 
-The local cache unlock key is high entropy or derived from the master-password-authenticated cache key. It is the secret that lets the current process decrypt the local encrypted cache without asking for the master password again. It must be wrapped by the PIN before storage; do not store the raw cache key in Secret Service.
+The cache unlock key is high entropy or derived from the master-password-authenticated cache key. The optional Bitwarden user key is the decrypted vault key material produced after a successful Bitwarden login. Together, this material lets the current process decrypt the local encrypted cache and, when online, restore enough SDK state to sync without asking for the master password again. It must be wrapped by the PIN before storage; do not store raw cache keys or raw user keys directly in Secret Service.
+
+Security impact: compromising both the Secret Service entry and the local PIN can expose the wrapped cache key and Bitwarden user key until the envelope expires. This is an intentional UX trade-off. The TTL, boot-id binding, PIN KDF, and failure backoff limit exposure, but the PIN is not equivalent to the master password under full local-user compromise.
 
 The envelope is valid only when:
 
@@ -83,7 +85,7 @@ Default local unlock TTL: `30m`, using existing `security.resident_relock_after`
 A short PIN is not as strong as the master password. The design relies on layered controls:
 
 - Secret Service protects access to the envelope.
-- The PIN wraps the local cache unlock key so a same-user process cannot use the raw key unless it can also unlock the envelope.
+- The PIN wraps the local unlock material so a same-user process cannot use the raw cache key or Bitwarden user key unless it can also unlock the envelope.
 - Argon2id makes PIN guessing more expensive.
 - The envelope expires by TTL and reboot.
 - Failed PIN attempts use local backoff and can delete the envelope after repeated failures.
@@ -113,7 +115,7 @@ Your vault cache is encrypted locally. Use the PIN to open the overlay until the
 ### Overlay startup
 
 1. Fail fast with setup guidance if Secret Service is unavailable.
-2. Load config and look for a token bundle.
+2. Load config and look for a token bundle by normalized email plus server identity. Account ID is payload metadata, not part of the lookup key, because startup may not know the account ID yet.
 3. If no token bundle exists, show login/onboarding UI.
 4. If a token bundle exists, refresh the Bitwarden access token when expired or close to expiry.
 5. If a valid local unlock envelope exists, show a compact PIN prompt, similar to sekeve.
@@ -217,7 +219,7 @@ The adapter serializes token bundles and unlock envelopes as JSON before storing
 
 ### Token refresh integration
 
-The app should use the SDK token refresh capability when an access token is expired or near expiry. After refresh, it saves the new token bundle back to Secret Service.
+The app should use a public SDK refresh capability when an access token is expired or near expiry. After refresh, it saves the new token bundle back to Secret Service before continuing.
 
 The app should treat refresh failure as an authentication boundary:
 
@@ -243,6 +245,7 @@ Required or proposed settings:
 - `security.pin_min_length`: default `4` or `6`; final value should balance sekeve-like UX and brute-force cost
 - `security.pin_max_failures`: default `5`
 - `security.pin_backoff`: exponential, capped
+- `security.pin_max_failures`: after the final failed attempt, delete the local unlock envelope and require the master password
 
 Existing `security.idle_relock_after` and `security.resident_relock_after` should either be mapped to these concepts or renamed in a migration-safe way.
 
