@@ -126,6 +126,7 @@ func (s *Store) CheckAvailable(ctx context.Context) error {
 
 func (s *Store) SaveTokenBundle(ctx context.Context, ref session.AccountRef, bundle session.TokenBundle) error {
 	clone := bundle.Clone()
+	defer clone.Close()
 
 	data, err := json.Marshal(clone)
 	if err != nil {
@@ -186,7 +187,10 @@ func (s *Store) DeleteTokenBundle(ctx context.Context, ref session.AccountRef) e
 }
 
 func (s *Store) SaveUnlockEnvelope(ctx context.Context, ref session.AccountRef, envelope session.UnlockEnvelope) error {
-	data, err := json.Marshal(envelope)
+	clone := envelope.Clone()
+	defer clone.Close()
+
+	data, err := json.Marshal(clone)
 	if err != nil {
 		return err
 	}

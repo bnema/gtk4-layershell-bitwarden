@@ -92,6 +92,29 @@ type UnlockEnvelope struct {
 	BackoffUntil   time.Time  `json:"backoffUntil"`
 }
 
+// Clone returns a deep copy of the UnlockEnvelope, deep-copying Salt and
+// Ciphertext slices.
+func (e UnlockEnvelope) Clone() UnlockEnvelope {
+	c := e
+	if e.Salt != nil {
+		c.Salt = make([]byte, len(e.Salt))
+		copy(c.Salt, e.Salt)
+	}
+	if e.Ciphertext != nil {
+		c.Ciphertext = make([]byte, len(e.Ciphertext))
+		copy(c.Ciphertext, e.Ciphertext)
+	}
+	return c
+}
+
+// Close zeroes the backing arrays of Salt and Ciphertext and nils them.
+func (e *UnlockEnvelope) Close() {
+	clear(e.Salt)
+	clear(e.Ciphertext)
+	e.Salt = nil
+	e.Ciphertext = nil
+}
+
 // AuthStatus describes the authentication state of a session.
 type AuthStatus string
 

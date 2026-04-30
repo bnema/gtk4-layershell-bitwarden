@@ -303,3 +303,68 @@ func TestTokenBundleAndUnlockMaterialCloneAndCloseNoAlias(t *testing.T) {
 		um.Close() // should not panic
 	})
 }
+
+func TestUnlockEnvelopeCloneAndCloseNoAlias(t *testing.T) {
+	t.Run("clone is independent", func(t *testing.T) {
+		orig := UnlockEnvelope{
+			Salt:       []byte("sixteen-byte-salt"),
+			Ciphertext: []byte("encrypted-data-bytes"),
+		}
+
+		clone := orig.Clone()
+
+		clone.Salt[0] = 'X'
+		clone.Ciphertext[0] = 'Y'
+
+		if orig.Salt[0] != 's' {
+			t.Fatal("Clone did not deep-copy Salt")
+		}
+		if orig.Ciphertext[0] != 'e' {
+			t.Fatal("Clone did not deep-copy Ciphertext")
+		}
+	})
+
+	t.Run("close zeroes backing arrays", func(t *testing.T) {
+		salt := []byte("salt-for-test")
+		ciphertext := []byte("ciphertext-for-test")
+		e := &UnlockEnvelope{
+			Salt:       salt,
+			Ciphertext: ciphertext,
+		}
+
+		e.Close()
+
+		for i, b := range salt {
+			if b != 0 {
+				t.Fatalf("Salt backing[%d] = %d, want 0", i, b)
+			}
+		}
+		for i, b := range ciphertext {
+			if b != 0 {
+				t.Fatalf("Ciphertext backing[%d] = %d, want 0", i, b)
+			}
+		}
+
+		if e.Salt != nil {
+			t.Fatal("Salt should be nil after Close")
+		}
+		if e.Ciphertext != nil {
+			t.Fatal("Ciphertext should be nil after Close")
+		}
+	})
+
+	t.Run("clone of nil slices stays nil", func(t *testing.T) {
+		e := UnlockEnvelope{}.Clone()
+		if e.Salt != nil {
+			t.Fatal("expected nil Salt")
+		}
+		if e.Ciphertext != nil {
+			t.Fatal("expected nil Ciphertext")
+		}
+	})
+
+	t.Run("close on empty envelope is safe", func(t *testing.T) {
+		e := &UnlockEnvelope{}
+		e.Close() // should not panic
+	})
+}

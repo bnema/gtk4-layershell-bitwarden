@@ -101,7 +101,9 @@ func (s Service) Create(
 	)
 
 	// Clone and marshal the unlock material.
-	plaintext, err := json.Marshal(material.Clone())
+	clone := material.Clone()
+	defer clone.Close()
+	plaintext, err := json.Marshal(clone)
 	if err != nil {
 		clear(key)
 		return session.UnlockEnvelope{}, err
