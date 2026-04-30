@@ -190,23 +190,29 @@ func accountRefFromConfig(cfg *coreconfig.Config) session.AccountRef {
 // left untouched.
 func deleteUnlockEnvelopeForConfig(ctx context.Context, store out.CredentialStore, cfg *coreconfig.Config) error {
 	if err := store.CheckAvailable(ctx); err != nil {
-		return err
+		return fmt.Errorf("check credential store: %w", err)
 	}
 	ref := accountRefFromConfig(cfg)
-	return store.DeleteUnlockEnvelope(ctx, ref)
+	if err := store.DeleteUnlockEnvelope(ctx, ref); err != nil {
+		return fmt.Errorf("delete unlock envelope: %w", err)
+	}
+	return nil
 }
 
 // deleteCredentialsForConfig checks keyring availability and deletes both the
 // unlock envelope and token bundle for the configured account.
 func deleteCredentialsForConfig(ctx context.Context, store out.CredentialStore, cfg *coreconfig.Config) error {
 	if err := store.CheckAvailable(ctx); err != nil {
-		return err
+		return fmt.Errorf("check credential store: %w", err)
 	}
 	ref := accountRefFromConfig(cfg)
 	if err := store.DeleteUnlockEnvelope(ctx, ref); err != nil {
-		return err
+		return fmt.Errorf("delete unlock envelope: %w", err)
 	}
-	return store.DeleteTokenBundle(ctx, ref)
+	if err := store.DeleteTokenBundle(ctx, ref); err != nil {
+		return fmt.Errorf("delete token bundle: %w", err)
+	}
+	return nil
 }
 
 // ---------------------------------------------------------------------------

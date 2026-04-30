@@ -458,7 +458,7 @@ func newLockCmd(opts Options) *cobra.Command {
 
 			store := credentialStore(opts)
 			if err := deleteUnlockEnvelopeForConfig(cmd.Context(), store, cfg); err != nil {
-				return err
+				return fmt.Errorf("lock: %w", err)
 			}
 
 			cmd.Println("Local unlock cleared.")
