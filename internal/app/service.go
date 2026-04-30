@@ -171,6 +171,137 @@ func (s *Service) UnlockWithTwoFactor(ctx context.Context, email, password strin
 	return s.unlock(ctx, email, password, prompt)
 }
 
+// UnlockWithPIN unlocks the vault using a previously-stored PIN unlock envelope.
+// It loads the token bundle and unlock envelope from the credential store, opens
+// the envelope with the provided PIN, and restores the remote session. On PIN
+// mismatch, failure counters are persisted; after max failures the envelope is
+// deleted. Expired, boot-changed, and other validation errors are returned
+// without restoring the session.
+func (s *Service) UnlockWithPIN(ctx context.Context, email, pin string) (retErr error) {
+	// 1. Validate dependencies.
+	if err := s.checkCredentialsAvailable(ctx); err != nil {
+		return fmt.Errorf("app: unlock-pin: credentials: %w", err)
+	}
+	if s.deps.BootID == nil {
+		return fmt.Errorf("app: unlock-pin: %w", cerrors.ErrUnsupported)
+	}
+	if s.deps.PINEnvelope == nil {
+		return fmt.Errorf("app: unlock-pin: %w", cerrors.ErrUnsupported)
+	}
+	if s.deps.Remote == nil {
+		return fmt.Errorf("app: unlock-pin: %w", cerrors.ErrUnsupported)
+	}
+
+	// 2. Check service state.
+	s.mu.Lock()
+	if s.state != auth.LockStateLocked {
+		s.mu.Unlock()
+		return fmt.Errorf("app: cannot unlock in state %s", s.state)
+	}
+	s.state = auth.LockStateUnlocking
+	s.lifecycle++
+	token := s.lifecycle
+	s.mu.Unlock()
+
+	s.emit(Unlocking, "unlocking vault with PIN")
+
+	// 3. Build account reference.
+	ref := s.accountRef(email)
+
+	// 4. Load and refresh token bundle.
+	tokens, err := s.ensureFreshTokens(ctx, ref)
+	if err != nil {
+		s.mu.Lock()
+		s.state = auth.LockStateLocked
+		s.mu.Unlock()
+		return err
+	}
+
+	// 5. Load unlock envelope.
+	envelope, err := s.deps.Credentials.LoadUnlockEnvelope(ctx, ref)
+	if err != nil {
+		s.mu.Lock()
+		s.state = auth.LockStateLocked
+		s.mu.Unlock()
+		return fmt.Errorf("app: unlock-pin: load envelope: %w", err)
+	}
+
+	// 6. Get boot ID.
+	bootID, err := s.deps.BootID.BootID(ctx)
+	if err != nil {
+		s.mu.Lock()
+		s.state = auth.LockStateLocked
+		s.mu.Unlock()
+		return fmt.Errorf("app: unlock-pin: boot id: %w", err)
+	}
+
+	// 7. Open the PIN envelope.
+	material, opened, openErr := s.deps.PINEnvelope.Open(ctx, ref, envelope, pin, bootID)
+
+	if openErr != nil {
+		// Determine if failure counters changed (PIN-related error).
+		countersChanged := opened.FailedAttempts > envelope.FailedAttempts ||
+			opened.BackoffUntil != envelope.BackoffUntil
+
+		if countersChanged {
+			if opened.ShouldDeleteAfterFailures() {
+				_ = s.deps.Credentials.DeleteUnlockEnvelope(ctx, ref)
+			} else {
+				if saveErr := s.deps.Credentials.SaveUnlockEnvelope(ctx, ref, opened); saveErr != nil {
+					if s.deps.Logger != nil {
+						s.deps.Logger.Error("app: unlock-pin: save failed-envelope failed", "error", saveErr)
+					}
+				}
+			}
+		}
+
+		s.mu.Lock()
+		s.state = auth.LockStateLocked
+		s.mu.Unlock()
+		return openErr
+	}
+	defer material.Close()
+
+	// 8. Save updated envelope if failure counters changed (reset after success).
+	if opened.FailedAttempts != envelope.FailedAttempts || opened.BackoffUntil != envelope.BackoffUntil {
+		if saveErr := s.deps.Credentials.SaveUnlockEnvelope(ctx, ref, opened); saveErr != nil {
+			if s.deps.Logger != nil {
+				s.deps.Logger.Error("app: unlock-pin: save reset-envelope failed", "error", saveErr)
+			}
+		}
+	}
+
+	// 9. Restore remote session.
+	if err := s.deps.Remote.RestoreSession(ctx, material, tokens); err != nil {
+		s.mu.Lock()
+		s.state = auth.LockStateLocked
+		s.mu.Unlock()
+		return fmt.Errorf("app: unlock-pin: restore session: %w", err)
+	}
+
+	// 10. Install local state.
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.lifecycle != token || s.state != auth.LockStateUnlocking {
+		return fmt.Errorf("app: unlock lifecycle superseded: %w", context.Canceled)
+	}
+
+	// Copy cache key from material (derived during Login).
+	s.zeroCacheKeyLocked()
+	s.cacheKey = make([]byte, len(material.CacheKey))
+	copy(s.cacheKey, material.CacheKey)
+	s.state = auth.LockStateUnlocked
+
+	// Start background sync worker.
+	workerCtx, cancel := context.WithCancel(context.Background())
+	s.cancelWorkers = cancel
+	s.emit(Unlocking, "starting sync worker")
+	s.startMinimalSyncWorker(workerCtx)
+
+	return nil
+}
+
 func (s *Service) unlock(ctx context.Context, email, password string, prompt auth.TwoFactorPrompt) (retErr error) {
 	s.mu.Lock()
 	if s.state != auth.LockStateLocked {

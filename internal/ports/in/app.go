@@ -43,6 +43,7 @@ type AppService interface {
 	Login(ctx context.Context, input auth.LoginInput) error
 	Unlock(ctx context.Context, email, password string) error
 	UnlockWithTwoFactor(ctx context.Context, email, password string, prompt auth.TwoFactorPrompt) error
+	UnlockWithPIN(ctx context.Context, email, pin string) error
 	Lock(ctx context.Context) error
 	Search(ctx context.Context, query string, limit int) ([]vault.ScoredItem, error)
 	Items(ctx context.Context) ([]vault.Item, error)

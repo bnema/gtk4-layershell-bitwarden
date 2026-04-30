@@ -68,6 +68,11 @@ func (f *fakeAuthService) UnlockWithTwoFactor(ctx context.Context, email, passwo
 	}
 	return f.Unlock(ctx, email, password)
 }
+func (f *fakeAuthService) UnlockWithPIN(_ context.Context, email, pin string) error {
+	f.email = email
+	f.pin = pin
+	return nil
+}
 func (f *fakeAuthService) Lock(context.Context) error { return nil }
 func (f *fakeAuthService) Search(context.Context, string, int) ([]vault.ScoredItem, error) {
 	return nil, nil
