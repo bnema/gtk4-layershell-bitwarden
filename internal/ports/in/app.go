@@ -9,6 +9,7 @@ import (
 
 	"github.com/bnema/gtk4-layershell-bitwarden/internal/core/auth"
 	"github.com/bnema/gtk4-layershell-bitwarden/internal/core/config"
+	"github.com/bnema/gtk4-layershell-bitwarden/internal/core/session"
 	"github.com/bnema/gtk4-layershell-bitwarden/internal/core/sync"
 	"github.com/bnema/gtk4-layershell-bitwarden/internal/core/vault"
 )
@@ -59,4 +60,5 @@ type AppService interface {
 	UpdateConfig(ctx context.Context, cfg *config.Config) error
 	Events() <-chan Event
 	Shutdown(ctx context.Context) error
+	AuthStatus(ctx context.Context, email string) (session.AuthStatus, error)
 }

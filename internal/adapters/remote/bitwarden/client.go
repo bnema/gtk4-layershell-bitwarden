@@ -12,6 +12,7 @@ import (
 	sdk "github.com/bnema/bitwarden-go-sdk/bitwarden"
 	coreauth "github.com/bnema/gtk4-layershell-bitwarden/internal/core/auth"
 	coreconfig "github.com/bnema/gtk4-layershell-bitwarden/internal/core/config"
+	coreerrors "github.com/bnema/gtk4-layershell-bitwarden/internal/core/errors"
 	coresession "github.com/bnema/gtk4-layershell-bitwarden/internal/core/session"
 	corevault "github.com/bnema/gtk4-layershell-bitwarden/internal/core/vault"
 	"github.com/bnema/gtk4-layershell-bitwarden/internal/ports/out"
@@ -452,6 +453,9 @@ func (c *Client) RefreshTokenBundle(ctx context.Context, tokens coresession.Toke
 
 	result, err := refreshClient.RefreshSession(ctx, tokens.AccountID)
 	if err != nil {
+		if errors.Is(err, sdk.ErrUnauthorized) {
+			return coresession.TokenBundle{}, fmt.Errorf("bitwarden adapter: token refresh unauthorized: %w", coreerrors.ErrUnauthenticated)
+		}
 		return coresession.TokenBundle{}, err
 	}
 

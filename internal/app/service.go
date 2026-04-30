@@ -16,6 +16,7 @@ import (
 	"github.com/bnema/gtk4-layershell-bitwarden/internal/core/cache"
 	"github.com/bnema/gtk4-layershell-bitwarden/internal/core/config"
 	cerrors "github.com/bnema/gtk4-layershell-bitwarden/internal/core/errors"
+	"github.com/bnema/gtk4-layershell-bitwarden/internal/core/session"
 	coresync "github.com/bnema/gtk4-layershell-bitwarden/internal/core/sync"
 	"github.com/bnema/gtk4-layershell-bitwarden/internal/core/vault"
 	"golang.org/x/crypto/argon2"
@@ -581,6 +582,141 @@ func (s *Service) accountHashLocked() string {
 	}
 	sum := sha256.Sum256([]byte(strings.ToLower(strings.TrimSpace(email))))
 	return fmt.Sprintf("%x", sum[:])
+}
+
+// ---------------------------------------------------------------------------
+// Auth status helpers
+// ---------------------------------------------------------------------------
+
+const (
+	refreshBeforeExpiry = 2 * time.Minute
+)
+
+// accountRef builds a session.AccountRef from the given email and the
+// effective server URL derived from the current configuration.
+func (s *Service) accountRef(email string) session.AccountRef {
+	return session.AccountRef{
+		Email:     strings.ToLower(strings.TrimSpace(email)),
+		ServerURL: s.effectiveServerURL(),
+	}
+}
+
+// effectiveServerURL returns the current effective server URL based on config.
+// Unexported for now; tests exercise it through accountRef and AuthStatus.
+func (s *Service) effectiveServerURL() string {
+	s.mu.Lock()
+	cfg := s.cfg
+	s.mu.Unlock()
+
+	if cfg == nil {
+		return "https://vault.bitwarden.com"
+	}
+
+	if cfg.Bitwarden.Region == config.RegionSelfHosted && cfg.Bitwarden.ServerURL != "" {
+		return strings.TrimRight(cfg.Bitwarden.ServerURL, "/")
+	}
+
+	switch cfg.Bitwarden.Region {
+	case config.RegionEU:
+		return "https://vault.bitwarden.eu"
+	default:
+		return "https://vault.bitwarden.com"
+	}
+}
+
+// checkCredentialsAvailable checks whether the credential store is available
+// and healthy. Returns a validation error when s.deps.Credentials is nil, or
+// the result of CheckAvailable otherwise.
+func (s *Service) checkCredentialsAvailable(ctx context.Context) error {
+	if s.deps.Credentials == nil {
+		return cerrors.ErrUnsupported
+	}
+	return s.deps.Credentials.CheckAvailable(ctx)
+}
+
+// ensureFreshTokens loads the token bundle from the credential store and
+// refreshes it when the access token is expired or within 2 minutes of expiry.
+// On successful refresh, Email and ServerURL metadata are preserved and the
+// updated bundle is saved back to the credential store.
+//
+// Error/save-back behavior:
+//   - Token still valid for >2 minutes: return loaded bundle unchanged.
+//   - Expired or near-expiry + refresh success: save, return updated bundle.
+//   - Refresh returns unauthenticated / invalid grant: delete bundle, return error.
+//   - Refresh returns transient / network / other: keep bundle, return error.
+func (s *Service) ensureFreshTokens(ctx context.Context, ref session.AccountRef) (session.TokenBundle, error) {
+	bundle, err := s.deps.Credentials.LoadTokenBundle(ctx, ref)
+	if err != nil {
+		return session.TokenBundle{}, fmt.Errorf("app: load token bundle: %w", err)
+	}
+
+	// If the token is still fresh (not zero and more than 2 minutes from now),
+	// return the loaded bundle unchanged.
+	if !bundle.ExpiresAt.IsZero() && time.Until(bundle.ExpiresAt) > refreshBeforeExpiry {
+		return bundle, nil
+	}
+
+	// Token is expired or about to expire; attempt refresh.
+	updated, err := s.deps.Remote.RefreshTokenBundle(ctx, bundle)
+	if err != nil {
+		if errors.Is(err, cerrors.ErrUnauthenticated) {
+			// Invalid grant / unauthenticated — delete the token bundle.
+			_ = s.deps.Credentials.DeleteTokenBundle(ctx, ref)
+		}
+		return session.TokenBundle{}, fmt.Errorf("app: refresh token bundle: %w", err)
+	}
+
+	// Preserve metadata from the original bundle.
+	updated.Email = bundle.Email
+	updated.ServerURL = bundle.ServerURL
+	updated.UpdatedAt = s.now()
+
+	if saveErr := s.deps.Credentials.SaveTokenBundle(ctx, ref, updated); saveErr != nil {
+		if s.deps.Logger != nil {
+			s.deps.Logger.Error("app: save refreshed token bundle failed", "error", saveErr)
+		}
+	}
+
+	return updated, nil
+}
+
+// AuthStatus reports the session authentication state for the given email.
+func (s *Service) AuthStatus(ctx context.Context, email string) (session.AuthStatus, error) {
+	if err := s.checkCredentialsAvailable(ctx); err != nil {
+		return session.KeyringUnavailable, err
+	}
+
+	ref := s.accountRef(email)
+
+	// Load token bundle; if not found the user is unauthenticated.
+	_, err := s.deps.Credentials.LoadTokenBundle(ctx, ref)
+	if err != nil {
+		return session.Unauthenticated, nil
+	}
+
+	// Load unlock envelope; if not found the vault is locked.
+	env, err := s.deps.Credentials.LoadUnlockEnvelope(ctx, ref)
+	if err != nil {
+		return session.LoggedInLocked, nil
+	}
+
+	// BootID dependency is required to validate the envelope.
+	if s.deps.BootID == nil {
+		return session.LoggedInLocked, nil
+	}
+
+	bootID, err := s.deps.BootID.BootID(ctx)
+	if err != nil {
+		return session.LoggedInLocked, fmt.Errorf("app: boot id: %w", err)
+	}
+
+	if err := env.Validate(ref, bootID, s.now()); err != nil {
+		// Envelope validation failed: account mismatch, boot changed,
+		// expired, or PIN backoff.
+		return session.LoggedInLocked, nil
+	}
+
+	return session.LoggedInUnlockAvailable, nil
 }
 
 func saveEncryptedSnapshot(ctx context.Context, store interface {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"sync"
@@ -100,6 +101,12 @@ type fakeRemote struct {
 	onCreate     func(ctx context.Context, item vault.Item) (vault.Item, error)
 	onSync       func(ctx context.Context) ([]vault.Item, []vault.Folder, string, error)
 	syncEnterCh  chan struct{} // signaled when Sync enters (before block)
+
+	// RefreshTokenBundle configurable
+	refreshTokenBundleFunc    func(ctx context.Context, bundle session.TokenBundle) (session.TokenBundle, error)
+	refreshTokenBundleResult  session.TokenBundle
+	refreshTokenBundleErr     error
+	refreshTokenBundleCallCnt atomic.Int32
 }
 
 func (r *fakeRemote) Login(ctx context.Context, email, password string) error {
@@ -280,8 +287,18 @@ func (r *fakeRemote) RestoreSession(_ context.Context, _ session.UnlockMaterial,
 	return fmt.Errorf("fakeRemote: not implemented")
 }
 
-func (r *fakeRemote) RefreshTokenBundle(_ context.Context, _ session.TokenBundle) (session.TokenBundle, error) {
-	return session.TokenBundle{}, fmt.Errorf("fakeRemote: not implemented")
+func (r *fakeRemote) RefreshTokenBundle(ctx context.Context, bundle session.TokenBundle) (session.TokenBundle, error) {
+	r.refreshTokenBundleCallCnt.Add(1)
+	r.mu.Lock()
+	fn := r.refreshTokenBundleFunc
+	res := r.refreshTokenBundleResult
+	err := r.refreshTokenBundleErr
+	r.mu.Unlock()
+
+	if fn != nil {
+		return fn(ctx, bundle)
+	}
+	return res, err
 }
 
 type fakeCache struct {
@@ -346,6 +363,94 @@ func (f *fakeSecretBox) Seal(plaintext, key []byte) ([]byte, error) {
 
 func (f *fakeSecretBox) Open(ciphertext, key []byte) ([]byte, error) {
 	return ciphertext, nil
+}
+
+// ---------------------------------------------------------------------------
+// Fake credential store
+// ---------------------------------------------------------------------------
+
+type fakeCredentialStore struct {
+	mu sync.Mutex
+
+	checkAvailableErr   error
+	checkAvailableCalls int
+
+	tokenBundle     session.TokenBundle
+	loadTokenErr    error
+	loadTokenCalls  int
+	saveTokenCalled int
+	delTokenCalls   int
+
+	envelope        session.UnlockEnvelope
+	loadEnvelopeErr error
+	loadEnvCalls    int
+	saveEnvCalled   int
+	delEnvCalls     int
+}
+
+func (cs *fakeCredentialStore) CheckAvailable(_ context.Context) error {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	cs.checkAvailableCalls++
+	return cs.checkAvailableErr
+}
+
+func (cs *fakeCredentialStore) SaveTokenBundle(_ context.Context, _ session.AccountRef, _ session.TokenBundle) error {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	cs.saveTokenCalled++
+	return nil
+}
+
+func (cs *fakeCredentialStore) LoadTokenBundle(_ context.Context, _ session.AccountRef) (session.TokenBundle, error) {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	cs.loadTokenCalls++
+	return cs.tokenBundle, cs.loadTokenErr
+}
+
+func (cs *fakeCredentialStore) DeleteTokenBundle(_ context.Context, _ session.AccountRef) error {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	cs.delTokenCalls++
+	return nil
+}
+
+func (cs *fakeCredentialStore) SaveUnlockEnvelope(_ context.Context, _ session.AccountRef, _ session.UnlockEnvelope) error {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	cs.saveEnvCalled++
+	return nil
+}
+
+func (cs *fakeCredentialStore) LoadUnlockEnvelope(_ context.Context, _ session.AccountRef) (session.UnlockEnvelope, error) {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	cs.loadEnvCalls++
+	return cs.envelope, cs.loadEnvelopeErr
+}
+
+func (cs *fakeCredentialStore) DeleteUnlockEnvelope(_ context.Context, _ session.AccountRef) error {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	cs.delEnvCalls++
+	return nil
+}
+
+// ---------------------------------------------------------------------------
+// Fake boot ID provider
+// ---------------------------------------------------------------------------
+
+type fakeBootID struct {
+	mu  sync.Mutex
+	id  string
+	err error
+}
+
+func (b *fakeBootID) BootID(_ context.Context) (string, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.id, b.err
 }
 
 // ---------------------------------------------------------------------------
@@ -1375,3 +1480,352 @@ func TestLockDuringUnlockPreventsInstall(t *testing.T) {
 	_, err := svc.Search(context.Background(), "test", 10)
 	require.ErrorIs(t, err, coreerrors.ErrLocked)
 }
+
+// ---------------------------------------------------------------------------
+// AuthStatus tests
+// ---------------------------------------------------------------------------
+
+func TestAuthStatusUsesKeyringAndEnvelope(t *testing.T) {
+	email := "user@example.com"
+	ref := session.AccountRef{
+		Email:     "user@example.com",
+		ServerURL: "https://vault.bitwarden.com",
+	}
+
+	validBundle := session.TokenBundle{
+		AccountID:    "acct-1",
+		Email:        email,
+		ServerURL:    ref.ServerURL,
+		AccessToken:  []byte("at"),
+		RefreshToken: []byte("rt"),
+		TokenType:    "Bearer",
+		ExpiresAt:    time.Now().Add(time.Hour),
+	}
+
+	validEnvelope := session.UnlockEnvelope{
+		Version:   session.UnlockEnvelopeVersion,
+		Account:   ref,
+		AccountID: "acct-1",
+		BootID:    "boot-123",
+		ExpiresAt: time.Now().Add(time.Hour),
+	}
+
+	t.Run("no token => unauthenticated", func(t *testing.T) {
+		cs := &fakeCredentialStore{loadTokenErr: coreerrors.ErrNotFound}
+		svc := NewService(Deps{
+			Config:      coreconfig.Default(),
+			Credentials: cs,
+		})
+
+		status, err := svc.AuthStatus(context.Background(), email)
+		require.NoError(t, err)
+		require.Equal(t, session.Unauthenticated, status)
+	})
+
+	t.Run("token no envelope => logged_in_locked", func(t *testing.T) {
+		cs := &fakeCredentialStore{
+			tokenBundle:     validBundle,
+			loadEnvelopeErr: coreerrors.ErrNotFound,
+		}
+		svc := NewService(Deps{
+			Config:      coreconfig.Default(),
+			Credentials: cs,
+		})
+
+		status, err := svc.AuthStatus(context.Background(), email)
+		require.NoError(t, err)
+		require.Equal(t, session.LoggedInLocked, status)
+	})
+
+	t.Run("token + valid envelope => unlock_available", func(t *testing.T) {
+		cs := &fakeCredentialStore{
+			tokenBundle: validBundle,
+			envelope:    validEnvelope,
+		}
+		boot := &fakeBootID{id: "boot-123"}
+		svc := NewService(Deps{
+			Config:      coreconfig.Default(),
+			Credentials: cs,
+			BootID:      boot,
+		})
+
+		status, err := svc.AuthStatus(context.Background(), email)
+		require.NoError(t, err)
+		require.Equal(t, session.LoggedInUnlockAvailable, status)
+	})
+
+	t.Run("keyring unavailable", func(t *testing.T) {
+		cs := &fakeCredentialStore{checkAvailableErr: coreerrors.ErrUnsupported}
+		svc := NewService(Deps{
+			Config:      coreconfig.Default(),
+			Credentials: cs,
+		})
+
+		status, err := svc.AuthStatus(context.Background(), email)
+		require.Error(t, err)
+		require.Equal(t, session.KeyringUnavailable, status)
+		require.ErrorIs(t, err, coreerrors.ErrUnsupported)
+	})
+
+	t.Run("nil credentials => keyring_unavailable", func(t *testing.T) {
+		svc := NewService(Deps{
+			Config: coreconfig.Default(),
+		})
+
+		status, err := svc.AuthStatus(context.Background(), email)
+		require.Error(t, err)
+		require.Equal(t, session.KeyringUnavailable, status)
+	})
+
+	t.Run("bootID nil => logged_in_locked", func(t *testing.T) {
+		cs := &fakeCredentialStore{
+			tokenBundle: validBundle,
+			envelope:    validEnvelope,
+		}
+		svc := NewService(Deps{
+			Config:      coreconfig.Default(),
+			Credentials: cs,
+			BootID:      nil, // no BootID provider
+		})
+
+		status, err := svc.AuthStatus(context.Background(), email)
+		require.NoError(t, err)
+		require.Equal(t, session.LoggedInLocked, status)
+	})
+
+	t.Run("envelope expired => logged_in_locked", func(t *testing.T) {
+		expiredEnv := validEnvelope.Clone()
+		expiredEnv.ExpiresAt = time.Now().Add(-time.Hour)
+		cs := &fakeCredentialStore{
+			tokenBundle: validBundle,
+			envelope:    expiredEnv,
+		}
+		boot := &fakeBootID{id: "boot-123"}
+		svc := NewService(Deps{
+			Config:      coreconfig.Default(),
+			Credentials: cs,
+			BootID:      boot,
+		})
+
+		status, err := svc.AuthStatus(context.Background(), email)
+		require.NoError(t, err)
+		require.Equal(t, session.LoggedInLocked, status)
+	})
+
+	t.Run("bootID changed => logged_in_locked", func(t *testing.T) {
+		cs := &fakeCredentialStore{
+			tokenBundle: validBundle,
+			envelope:    validEnvelope,
+		}
+		boot := &fakeBootID{id: "boot-456"} // different from envelope's boot-123
+		svc := NewService(Deps{
+			Config:      coreconfig.Default(),
+			Credentials: cs,
+			BootID:      boot,
+		})
+
+		status, err := svc.AuthStatus(context.Background(), email)
+		require.NoError(t, err)
+		require.Equal(t, session.LoggedInLocked, status)
+	})
+}
+
+func TestAuthStatusEffectiveServerURL(t *testing.T) {
+	t.Run("default US", func(t *testing.T) {
+		cs := &fakeCredentialStore{loadTokenErr: coreerrors.ErrNotFound}
+		svc := NewService(Deps{Config: coreconfig.Default(), Credentials: cs})
+
+		status, err := svc.AuthStatus(context.Background(), "user@example.com")
+		require.NoError(t, err)
+		require.Equal(t, session.Unauthenticated, status)
+		require.Equal(t, 1, cs.loadTokenCalls)
+	})
+
+	t.Run("EU region", func(t *testing.T) {
+		cfg := coreconfig.Default()
+		cfg.Bitwarden.Region = coreconfig.RegionEU
+		cs := &fakeCredentialStore{loadTokenErr: coreerrors.ErrNotFound}
+		svc := NewService(Deps{Config: cfg, Credentials: cs})
+
+		status, err := svc.AuthStatus(context.Background(), "user@example.com")
+		require.NoError(t, err)
+		require.Equal(t, session.Unauthenticated, status)
+	})
+
+	t.Run("self-hosted", func(t *testing.T) {
+		cfg := coreconfig.Default()
+		cfg.Bitwarden.Region = coreconfig.RegionSelfHosted
+		cfg.Bitwarden.ServerURL = "https://bw.example.com/custom"
+		cs := &fakeCredentialStore{loadTokenErr: coreerrors.ErrNotFound}
+		svc := NewService(Deps{Config: cfg, Credentials: cs})
+
+		status, err := svc.AuthStatus(context.Background(), "user@example.com")
+		require.NoError(t, err)
+		require.Equal(t, session.Unauthenticated, status)
+	})
+}
+
+// ---------------------------------------------------------------------------
+// ensureFreshTokens tests
+// ---------------------------------------------------------------------------
+
+func TestEnsureFreshTokensSkipsRefreshWhenFresh(t *testing.T) {
+	ref := session.AccountRef{
+		Email:     "user@example.com",
+		ServerURL: "https://vault.bitwarden.com",
+	}
+
+	freshBundle := session.TokenBundle{
+		AccountID:    "acct-1",
+		Email:        ref.Email,
+		ServerURL:    ref.ServerURL,
+		AccessToken:  []byte("at"),
+		RefreshToken: []byte("rt"),
+		TokenType:    "Bearer",
+		ExpiresAt:    time.Now().Add(10 * time.Minute), // > 2 min
+	}
+
+	cs := &fakeCredentialStore{tokenBundle: freshBundle}
+	fr := &fakeRemote{}
+
+	svc := NewService(Deps{
+		Config:      coreconfig.Default(),
+		Credentials: cs,
+		Remote:      fr,
+	})
+
+	bundle, err := svc.ensureFreshTokens(context.Background(), ref)
+	require.NoError(t, err)
+	require.Equal(t, freshBundle.ExpiresAt, bundle.ExpiresAt)
+	// Remote should not have been called.
+	require.Equal(t, int32(0), fr.refreshTokenBundleCallCnt.Load())
+}
+
+func TestEnsureFreshTokensRefreshesAndSavesNearExpiry(t *testing.T) {
+	ref := session.AccountRef{
+		Email:     "user@example.com",
+		ServerURL: "https://vault.bitwarden.com",
+	}
+
+	// Token expires in 1 minute (less than 2 minutes).
+	nearExpiryBundle := session.TokenBundle{
+		AccountID:    "acct-1",
+		Email:        ref.Email,
+		ServerURL:    ref.ServerURL,
+		AccessToken:  []byte("old-at"),
+		RefreshToken: []byte("old-rt"),
+		TokenType:    "Bearer",
+		ExpiresAt:    time.Now().Add(time.Minute),
+	}
+
+	updatedBundle := session.TokenBundle{
+		AccountID:    "acct-1",
+		AccessToken:  []byte("new-at"),
+		RefreshToken: []byte("new-rt"),
+		TokenType:    "Bearer",
+		ExpiresAt:    time.Now().Add(time.Hour),
+	}
+
+	cs := &fakeCredentialStore{tokenBundle: nearExpiryBundle}
+	fr := &fakeRemote{refreshTokenBundleResult: updatedBundle}
+
+	svc := NewService(Deps{
+		Config:      coreconfig.Default(),
+		Credentials: cs,
+		Remote:      fr,
+	})
+
+	result, err := svc.ensureFreshTokens(context.Background(), ref)
+	require.NoError(t, err)
+
+	// Tokens should be updated.
+	require.Equal(t, []byte("new-at"), result.AccessToken)
+	require.Equal(t, []byte("new-rt"), result.RefreshToken)
+
+	// Metadata (Email, ServerURL) should be preserved from original.
+	require.Equal(t, ref.Email, result.Email)
+	require.Equal(t, ref.ServerURL, result.ServerURL)
+
+	// Remote should have been called once.
+	require.Equal(t, int32(1), fr.refreshTokenBundleCallCnt.Load())
+
+	// Credential store should have saved the updated bundle.
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	require.Equal(t, 1, cs.saveTokenCalled)
+}
+
+func TestEnsureFreshTokensDeletesInvalidRefreshToken(t *testing.T) {
+	ref := session.AccountRef{
+		Email:     "user@example.com",
+		ServerURL: "https://vault.bitwarden.com",
+	}
+
+	nearExpiryBundle := session.TokenBundle{
+		AccountID:    "acct-1",
+		Email:        ref.Email,
+		ServerURL:    ref.ServerURL,
+		AccessToken:  []byte("old-at"),
+		RefreshToken: []byte("old-rt"),
+		TokenType:    "Bearer",
+		ExpiresAt:    time.Now().Add(time.Minute),
+	}
+
+	cs := &fakeCredentialStore{tokenBundle: nearExpiryBundle}
+	fr := &fakeRemote{refreshTokenBundleErr: coreerrors.ErrUnauthenticated}
+
+	svc := NewService(Deps{
+		Config:      coreconfig.Default(),
+		Credentials: cs,
+		Remote:      fr,
+	})
+
+	_, err := svc.ensureFreshTokens(context.Background(), ref)
+	require.Error(t, err)
+	require.True(t, errors.Is(err, coreerrors.ErrUnauthenticated))
+
+	// Credential store should have deleted the token bundle.
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	require.Equal(t, 1, cs.delTokenCalls)
+}
+
+func TestEnsureFreshTokensKeepsBundleOnTransientFailure(t *testing.T) {
+	ref := session.AccountRef{
+		Email:     "user@example.com",
+		ServerURL: "https://vault.bitwarden.com",
+	}
+
+	nearExpiryBundle := session.TokenBundle{
+		AccountID:    "acct-1",
+		Email:        ref.Email,
+		ServerURL:    ref.ServerURL,
+		AccessToken:  []byte("old-at"),
+		RefreshToken: []byte("old-rt"),
+		TokenType:    "Bearer",
+		ExpiresAt:    time.Now().Add(time.Minute),
+	}
+
+	netErr := errors.New("network error")
+	cs := &fakeCredentialStore{tokenBundle: nearExpiryBundle}
+	fr := &fakeRemote{refreshTokenBundleErr: netErr}
+
+	svc := NewService(Deps{
+		Config:      coreconfig.Default(),
+		Credentials: cs,
+		Remote:      fr,
+	})
+
+	_, err := svc.ensureFreshTokens(context.Background(), ref)
+	require.Error(t, err)
+
+	// Credential store should NOT have deleted the token bundle.
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	require.Equal(t, 0, cs.delTokenCalls)
+}
+
+// realClock is a minimal out.Clock that delegates to time.Now.
+type realClock struct{}
+
+func (realClock) Now() time.Time { return time.Now() }

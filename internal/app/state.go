@@ -13,13 +13,15 @@ import (
 
 // Deps holds the external dependencies the service needs.
 type Deps struct {
-	Remote    out.RemoteVault
-	Cache     out.CacheStore
-	SecretBox out.SecretBox
-	Outbox    out.OutboxStore
-	Clock     out.Clock
-	Logger    out.Logger
-	Config    *config.Config
+	Remote      out.RemoteVault
+	Cache       out.CacheStore
+	SecretBox   out.SecretBox
+	Outbox      out.OutboxStore
+	Clock       out.Clock
+	Logger      out.Logger
+	Config      *config.Config
+	Credentials out.CredentialStore
+	BootID      out.BootIDProvider
 }
 
 // Service implements the application's core business logic.

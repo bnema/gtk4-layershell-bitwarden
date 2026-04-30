@@ -15,6 +15,7 @@ import (
 
 	coreauth "github.com/bnema/gtk4-layershell-bitwarden/internal/core/auth"
 	coreconfig "github.com/bnema/gtk4-layershell-bitwarden/internal/core/config"
+	"github.com/bnema/gtk4-layershell-bitwarden/internal/core/session"
 	coresync "github.com/bnema/gtk4-layershell-bitwarden/internal/core/sync"
 	"github.com/bnema/gtk4-layershell-bitwarden/internal/core/vault"
 	"github.com/bnema/gtk4-layershell-bitwarden/internal/ports/in"
@@ -83,6 +84,9 @@ func (f *fakeAuthService) Events() <-chan in.Event                              
 func (f *fakeAuthService) Shutdown(context.Context) error {
 	close(f.events)
 	return nil
+}
+func (f *fakeAuthService) AuthStatus(_ context.Context, _ string) (session.AuthStatus, error) {
+	return session.Unauthenticated, nil
 }
 
 func TestLoginRawUnlocksAndSavesEmail(t *testing.T) {
