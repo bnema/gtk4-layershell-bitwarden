@@ -193,6 +193,35 @@ func TestOpenEnvelopeRejectsExpiredOrBootChanged(t *testing.T) {
 	})
 }
 
+func TestCreateCancelledContext(t *testing.T) {
+	svc := New(testConfig())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := svc.Create(ctx, testRef, testMaterial(), testPIN, testBootID)
+	if err != context.Canceled {
+		t.Fatalf("Create with cancelled context: expected context.Canceled, got %v", err)
+	}
+}
+
+func TestOpenCancelledContext(t *testing.T) {
+	svc := New(testConfig())
+
+	env, err := svc.Create(context.Background(), testRef, testMaterial(), testPIN, testBootID)
+	if err != nil {
+		t.Fatalf("Create failed: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, _, err = svc.Open(ctx, testRef, env, testPIN, testBootID)
+	if err != context.Canceled {
+		t.Fatalf("Open with cancelled context: expected context.Canceled, got %v", err)
+	}
+}
+
 func TestDefaultTTLIs30Minutes(t *testing.T) {
 	svc := New(ServiceConfig{})
 	ctx := context.Background()

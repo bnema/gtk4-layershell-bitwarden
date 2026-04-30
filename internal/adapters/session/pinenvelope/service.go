@@ -84,6 +84,12 @@ func (s Service) Create(
 		return session.UnlockEnvelope{}, errors.New("pinenvelope: UnlockMaterial must have at least one of CacheKey or UserKey")
 	}
 
+	// Short-circuit if the context is already cancelled before expensive
+	// KDF work.
+	if err := ctx.Err(); err != nil {
+		return session.UnlockEnvelope{}, err
+	}
+
 	// Generate a random 16-byte salt.
 	salt := make([]byte, saltSize)
 	if _, err := rand.Read(salt); err != nil {
@@ -180,6 +186,12 @@ func (s Service) Open(
 	}
 
 	if err := validateOpenEnvelope(updated, pin); err != nil {
+		return session.UnlockMaterial{}, updated, err
+	}
+
+	// Short-circuit if the context is already cancelled before expensive
+	// KDF work.
+	if err := ctx.Err(); err != nil {
 		return session.UnlockMaterial{}, updated, err
 	}
 

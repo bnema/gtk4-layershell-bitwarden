@@ -207,6 +207,120 @@ func TestCheckAvailableReturnsSecretServiceRequiredOnBackendError(t *testing.T) 
 		"error message should mention Secret Service")
 }
 
+func TestStoreTokenBundleNormalizedRef(t *testing.T) {
+	// Save with mixed-case email and trailing-slash URL, load with
+	// lowercase email and no trailing slash.  The normalized hash must
+	// match and the validation in LoadTokenBundle must pass.
+	fake := newFakeBackend()
+	store := NewForBackend(fake)
+	ctx := context.Background()
+
+	saveRef := session.AccountRef{
+		Email:     "User@Example.com",
+		ServerURL: "https://vault.bitwarden.eu/",
+	}
+	loadRef := session.AccountRef{
+		Email:     "user@example.com",
+		ServerURL: "https://vault.bitwarden.eu",
+	}
+
+	bundle := session.TokenBundle{
+		Email:        "User@Example.com",
+		ServerURL:    "https://vault.bitwarden.eu/",
+		AccessToken:  []byte("at"),
+		RefreshToken: []byte("rt"),
+	}
+
+	err := store.SaveTokenBundle(ctx, saveRef, bundle)
+	require.NoError(t, err, "SaveTokenBundle should succeed")
+
+	loaded, err := store.LoadTokenBundle(ctx, loadRef)
+	require.NoError(t, err, "LoadTokenBundle should succeed with normalized ref")
+
+	// Metadata must be non-empty (source-of-truth is what was saved).
+	assert.NotEmpty(t, loaded.Email, "loaded Email must not be empty")
+	assert.NotEmpty(t, loaded.ServerURL, "loaded ServerURL must not be empty")
+}
+
+func TestStoreContextCancelled(t *testing.T) {
+	methods := []struct {
+		name string
+		call func(*Store, context.Context, session.AccountRef) error
+	}{
+		{
+			name: "SaveTokenBundle",
+			call: func(s *Store, ctx context.Context, ref session.AccountRef) error {
+				return s.SaveTokenBundle(ctx, ref, session.TokenBundle{
+					Email:       ref.Email,
+					ServerURL:   ref.ServerURL,
+					AccessToken: []byte("at"),
+				})
+			},
+		},
+		{
+			name: "LoadTokenBundle",
+			call: func(s *Store, ctx context.Context, ref session.AccountRef) error {
+				_, err := s.LoadTokenBundle(ctx, ref)
+				return err
+			},
+		},
+		{
+			name: "DeleteTokenBundle",
+			call: func(s *Store, ctx context.Context, ref session.AccountRef) error {
+				return s.DeleteTokenBundle(ctx, ref)
+			},
+		},
+		{
+			name: "SaveUnlockEnvelope",
+			call: func(s *Store, ctx context.Context, ref session.AccountRef) error {
+				return s.SaveUnlockEnvelope(ctx, ref, session.UnlockEnvelope{
+					Salt:       []byte("s"),
+					Ciphertext: []byte("c"),
+				})
+			},
+		},
+		{
+			name: "LoadUnlockEnvelope",
+			call: func(s *Store, ctx context.Context, ref session.AccountRef) error {
+				_, err := s.LoadUnlockEnvelope(ctx, ref)
+				return err
+			},
+		},
+		{
+			name: "DeleteUnlockEnvelope",
+			call: func(s *Store, ctx context.Context, ref session.AccountRef) error {
+				return s.DeleteUnlockEnvelope(ctx, ref)
+			},
+		},
+	}
+
+	for _, m := range methods {
+		t.Run(m.name, func(t *testing.T) {
+			fake := newFakeBackend()
+			store := NewForBackend(fake)
+
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+
+			ref := session.AccountRef{
+				Email:     "test@example.com",
+				ServerURL: "https://vault.example.com",
+			}
+
+			err := m.call(store, ctx, ref)
+			require.ErrorIs(t, err, context.Canceled,
+				"%s with cancelled context should return context.Canceled", m.name)
+
+			// The fake backend must not have been touched.
+			fake.mu.Lock()
+			callCount := len(fake.calls)
+			fake.mu.Unlock()
+			assert.Zero(t, callCount,
+				"%s must not touch the backend when context is cancelled", m.name)
+		})
+	}
+}
+
 func TestLoadMissingMapsNotFound(t *testing.T) {
 	fake := newFakeBackend()
 	store := NewForBackend(fake)

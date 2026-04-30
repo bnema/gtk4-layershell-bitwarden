@@ -28,6 +28,30 @@ const (
 var errNotFound = errors.New("keyring: credential not found")
 
 // ---------------------------------------------------------------------------
+// Normalization helpers
+// ---------------------------------------------------------------------------
+
+// normalizeEmail normalizes an email address by trimming whitespace and
+// lowercasing it.
+func normalizeEmail(email string) string {
+	return strings.ToLower(strings.TrimSpace(email))
+}
+
+// normalizeServer normalizes a server URL by trimming whitespace and removing
+// the trailing slash.
+func normalizeServer(url string) string {
+	return strings.TrimRight(strings.TrimSpace(url), "/")
+}
+
+// normalizeRef returns a copy of ref with Email and ServerURL normalized.
+func normalizeRef(ref session.AccountRef) session.AccountRef {
+	return session.AccountRef{
+		Email:     normalizeEmail(ref.Email),
+		ServerURL: normalizeServer(ref.ServerURL),
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Backend abstraction
 // ---------------------------------------------------------------------------
 
@@ -84,10 +108,15 @@ func NewForBackend(b backend) *Store {
 // refHash returns a stable hex-encoded SHA-256 hash of the normalized
 // email and server URL fields in ref.
 func refHash(ref session.AccountRef) string {
-	email := strings.ToLower(strings.TrimSpace(ref.Email))
-	server := strings.TrimRight(strings.TrimSpace(ref.ServerURL), "/")
-	h := sha256.Sum256([]byte(email + "\x00" + server))
+	n := normalizeRef(ref)
+	h := sha256.Sum256([]byte(n.Email + "\x00" + n.ServerURL))
 	return hex.EncodeToString(h[:])
+}
+
+// checkContext returns the context error if the context is already done.
+func checkContext(ctx context.Context) error {
+	err := ctx.Err()
+	return err
 }
 
 // ---------------------------------------------------------------------------
@@ -125,6 +154,10 @@ func (s *Store) CheckAvailable(ctx context.Context) error {
 }
 
 func (s *Store) SaveTokenBundle(ctx context.Context, ref session.AccountRef, bundle session.TokenBundle) error {
+	if err := checkContext(ctx); err != nil {
+		return err
+	}
+
 	clone := bundle.Clone()
 	defer clone.Close()
 
@@ -141,6 +174,10 @@ func (s *Store) SaveTokenBundle(ctx context.Context, ref session.AccountRef, bun
 }
 
 func (s *Store) LoadTokenBundle(ctx context.Context, ref session.AccountRef) (session.TokenBundle, error) {
+	if err := checkContext(ctx); err != nil {
+		return session.TokenBundle{}, err
+	}
+
 	key := refHash(ref)
 	data, err := s.backend.Get(serviceToken, key)
 	if err != nil {
@@ -152,14 +189,18 @@ func (s *Store) LoadTokenBundle(ctx context.Context, ref session.AccountRef) (se
 		return session.TokenBundle{}, err
 	}
 
-	// Validate that loaded metadata is consistent with the requested ref.
-	if bundle.Email != "" && bundle.Email != ref.Email {
+	// Validate that loaded metadata is consistent with the normalized ref.
+	// refHash uses normalized values so the bundle was stored/looked up
+	// under the same normalized key.  Normalize both sides before comparing.
+	norm := normalizeRef(ref)
+
+	if bundle.Email != "" && normalizeEmail(bundle.Email) != norm.Email {
 		return session.TokenBundle{}, &coreerrors.Error{
 			Kind:    coreerrors.KindValidation,
 			Message: "loaded token bundle email does not match ref",
 		}
 	}
-	if bundle.ServerURL != "" && bundle.ServerURL != ref.ServerURL {
+	if bundle.ServerURL != "" && normalizeServer(bundle.ServerURL) != norm.ServerURL {
 		return session.TokenBundle{}, &coreerrors.Error{
 			Kind:    coreerrors.KindValidation,
 			Message: "loaded token bundle server URL does not match ref",
@@ -168,16 +209,20 @@ func (s *Store) LoadTokenBundle(ctx context.Context, ref session.AccountRef) (se
 
 	// Fill in empty metadata from the ref so callers always have it.
 	if bundle.Email == "" {
-		bundle.Email = ref.Email
+		bundle.Email = norm.Email
 	}
 	if bundle.ServerURL == "" {
-		bundle.ServerURL = ref.ServerURL
+		bundle.ServerURL = norm.ServerURL
 	}
 
 	return bundle, nil
 }
 
 func (s *Store) DeleteTokenBundle(ctx context.Context, ref session.AccountRef) error {
+	if err := checkContext(ctx); err != nil {
+		return err
+	}
+
 	key := refHash(ref)
 	err := s.backend.Delete(serviceToken, key)
 	if errors.Is(err, errNotFound) {
@@ -187,6 +232,10 @@ func (s *Store) DeleteTokenBundle(ctx context.Context, ref session.AccountRef) e
 }
 
 func (s *Store) SaveUnlockEnvelope(ctx context.Context, ref session.AccountRef, envelope session.UnlockEnvelope) error {
+	if err := checkContext(ctx); err != nil {
+		return err
+	}
+
 	clone := envelope.Clone()
 	defer clone.Close()
 
@@ -203,6 +252,10 @@ func (s *Store) SaveUnlockEnvelope(ctx context.Context, ref session.AccountRef, 
 }
 
 func (s *Store) LoadUnlockEnvelope(ctx context.Context, ref session.AccountRef) (session.UnlockEnvelope, error) {
+	if err := checkContext(ctx); err != nil {
+		return session.UnlockEnvelope{}, err
+	}
+
 	key := refHash(ref)
 	data, err := s.backend.Get(serviceUnlock, key)
 	if err != nil {
@@ -218,6 +271,10 @@ func (s *Store) LoadUnlockEnvelope(ctx context.Context, ref session.AccountRef) 
 }
 
 func (s *Store) DeleteUnlockEnvelope(ctx context.Context, ref session.AccountRef) error {
+	if err := checkContext(ctx); err != nil {
+		return err
+	}
+
 	key := refHash(ref)
 	err := s.backend.Delete(serviceUnlock, key)
 	if errors.Is(err, errNotFound) {
