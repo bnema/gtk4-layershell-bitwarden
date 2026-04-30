@@ -65,12 +65,12 @@ func NewFromSDK(client *sdk.Client) *Client {
 
 // Login authenticates with master password.
 func (c *Client) Login(ctx context.Context, email, password string) error {
-	return c.sdk.Login(ctx, sdk.LoginOptions{Email: email, Password: password})
+	return c.sdk.Login(ctx, loginOptions(email, password))
 }
 
 // BeginLogin starts login and returns a two-factor challenge when required.
 func (c *Client) BeginLogin(ctx context.Context, email, password string) (*coreauth.TwoFactorChallenge, error) {
-	result, err := c.sdk.BeginLogin(ctx, sdk.LoginOptions{Email: email, Password: password})
+	result, err := c.sdk.BeginLogin(ctx, loginOptions(email, password))
 	if err != nil {
 		return nil, err
 	}
@@ -107,6 +107,16 @@ func (c *Client) CompleteTwoFactorLogin(ctx context.Context, challenge *coreauth
 // challenge returned by BeginLogin.
 func (c *Client) CompleteTwoFactor(_ context.Context, _, _ string, _ bool) error {
 	return ErrTwoFactorUnsupported
+}
+
+func loginOptions(email, password string) sdk.LoginOptions {
+	return sdk.LoginOptions{
+		Email:            email,
+		Password:         password,
+		DeviceType:       "LinuxDesktop",
+		DeviceIdentifier: "gtk4-layershell-bitwarden",
+		DeviceName:       "gtk4-layershell-bitwarden",
+	}
 }
 
 func fromSDKProvider(provider sdk.TwoFactorProvider) coreauth.TwoFactorProvider {
