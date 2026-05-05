@@ -27,6 +27,10 @@ const (
 	cacheKeyArgonMemory  uint32 = 64 * 1024
 	cacheKeyArgonThreads uint8  = 4
 	cacheKeySize                = 32
+
+	// minPINLength is the minimum number of characters required for a
+	// local unlock PIN.
+	minPINLength = 4
 )
 
 // deriveCacheKey derives the local encrypted-cache/outbox key from the master
@@ -76,7 +80,7 @@ func (s *Service) emit(kind EventKind, message string) {
 // resulting token bundle and a PIN-protected unlock envelope in the OS
 // keyring. It performs remote login exactly once and requires a non-empty
 // PIN before any remote call.
-func (s *Service) Login(ctx context.Context, input auth.LoginInput) error {
+func (s *Service) Login(ctx context.Context, input auth.LoginInput) (retErr error) {
 	// 1. Validate credentials availability and dependencies before remote login.
 	if err := s.checkCredentialsAvailable(ctx); err != nil {
 		return fmt.Errorf("app: credentials: %w", err)
@@ -93,11 +97,22 @@ func (s *Service) Login(ctx context.Context, input auth.LoginInput) error {
 	if pin == "" {
 		return fmt.Errorf("app: login: PIN is required")
 	}
+	if len(pin) < minPINLength {
+		return fmt.Errorf("app: login: PIN must be at least %d characters", minPINLength)
+	}
 
 	// 3. Perform remote login and cache load exactly once.
 	if err := s.unlock(ctx, input.Email, input.Password, input.TwoFactorPrompt); err != nil {
 		return err
 	}
+
+	// Ensure local unlocked state/plaintext is cleared on any error after unlock.
+	// Use context.Background() so the lock cleanup is not cancelled by ctx.
+	defer func() {
+		if retErr != nil {
+			_ = s.Lock(context.Background())
+		}
+	}()
 
 	// 4. Export session material and token bundle from the authenticated remote.
 	material, tokens, err := s.deps.Remote.ExportSession(ctx)
@@ -308,6 +323,97 @@ func (s *Service) UnlockWithPIN(ctx context.Context, email, pin string) (retErr 
 	return nil
 }
 
+// UnlockAndCreateEnvelope unlocks with master password, exports session
+// material, creates a PIN envelope, and installs local state. It provides a
+// safe path for the GUI to transition from LoggedInLocked to fully enrolled
+// without requiring a CLI login. Returns an error if PIN envelope
+// dependencies are unavailable.
+func (s *Service) UnlockAndCreateEnvelope(ctx context.Context, email, password, pin string, prompt auth.TwoFactorPrompt) (retErr error) {
+	if s.deps.PINEnvelope == nil {
+		return fmt.Errorf("app: unlock-enroll: %w", cerrors.ErrUnsupported)
+	}
+	if s.deps.Credentials == nil {
+		return fmt.Errorf("app: unlock-enroll: %w", cerrors.ErrUnsupported)
+	}
+	if s.deps.BootID == nil {
+		return fmt.Errorf("app: unlock-enroll: %w", cerrors.ErrUnsupported)
+	}
+
+	// Validate PIN before any remote login.
+	pin = strings.TrimSpace(pin)
+	if pin == "" {
+		return fmt.Errorf("app: unlock-enroll: PIN is required")
+	}
+	if len(pin) < minPINLength {
+		return fmt.Errorf("app: unlock-enroll: PIN must be at least %d characters", minPINLength)
+	}
+
+	// Perform remote login.
+	if err := s.unlock(ctx, email, password, prompt); err != nil {
+		return err
+	}
+
+	// Ensure local unlocked state/plaintext is cleared on any error after unlock.
+	defer func() {
+		if retErr != nil {
+			_ = s.Lock(context.Background())
+		}
+	}()
+
+	// Export session material.
+	material, tokens, err := s.deps.Remote.ExportSession(ctx)
+	if err != nil {
+		return fmt.Errorf("app: export session: %w", err)
+	}
+	defer material.Close()
+	defer tokens.Close()
+
+	// Read cache key from service under lock.
+	s.mu.Lock()
+	var cacheKey []byte
+	if len(s.cacheKey) > 0 {
+		cacheKey = make([]byte, len(s.cacheKey))
+		copy(cacheKey, s.cacheKey)
+	}
+	s.mu.Unlock()
+
+	unlockMaterial := material.Clone()
+	defer unlockMaterial.Close()
+	if len(cacheKey) > 0 {
+		unlockMaterial.CacheKey = cacheKey
+	}
+
+	ref := s.accountRef(email)
+	tokens.Email = ref.Email
+	tokens.ServerURL = ref.ServerURL
+	tokens.UpdatedAt = s.now()
+
+	bootID, err := s.deps.BootID.BootID(ctx)
+	if err != nil {
+		return fmt.Errorf("app: boot id: %w", err)
+	}
+
+	envelope, err := s.deps.PINEnvelope.Create(ctx, ref, unlockMaterial, pin, bootID)
+	if err != nil {
+		return fmt.Errorf("app: create envelope: %w", err)
+	}
+	if tokens.AccountID != "" {
+		envelope.AccountID = tokens.AccountID
+	}
+
+	if err := s.deps.Credentials.SaveTokenBundle(ctx, ref, tokens); err != nil {
+		envelope.Close()
+		return fmt.Errorf("app: save token bundle: %w", err)
+	}
+	if err := s.deps.Credentials.SaveUnlockEnvelope(ctx, ref, envelope); err != nil {
+		_ = s.deps.Credentials.DeleteTokenBundle(ctx, ref)
+		envelope.Close()
+		return fmt.Errorf("app: save unlock envelope: %w", err)
+	}
+
+	return nil
+}
+
 func (s *Service) unlock(ctx context.Context, email, password string, prompt auth.TwoFactorPrompt) (retErr error) {
 	s.mu.Lock()
 	if s.state != auth.LockStateLocked {
@@ -448,6 +554,10 @@ func (s *Service) loadCacheData(ctx context.Context, password string) (items []v
 	} else {
 		return nil, nil, nil, nil, nil, false, fmt.Errorf("cache decrypt: secretbox unavailable")
 	}
+
+	// Zero plaintext bytes on any return path after SecretBox.Open succeeds,
+	// including early decode errors.
+	defer clear(plaintext)
 
 	var plain cache.PlainSnapshot
 	if err := json.Unmarshal(plaintext, &plain); err != nil {
@@ -805,6 +915,7 @@ func (s *Service) Shutdown(ctx context.Context) error {
 // ---------------------------------------------------------------------------
 
 // ensureUnlocked returns ErrLocked if the service is not in the unlocked state.
+// Caller must hold s.mu.
 func (s *Service) ensureUnlocked() error {
 	if s.state != auth.LockStateUnlocked {
 		return cerrors.ErrLocked
@@ -1020,9 +1131,7 @@ func (s *Service) ensureFreshTokens(ctx context.Context, ref session.AccountRef)
 	updated.UpdatedAt = s.now()
 
 	if saveErr := s.deps.Credentials.SaveTokenBundle(ctx, ref, updated); saveErr != nil {
-		if s.deps.Logger != nil {
-			s.deps.Logger.Error("app: save refreshed token bundle failed", "error", saveErr)
-		}
+		return session.TokenBundle{}, fmt.Errorf("app: save refreshed token bundle: %w", saveErr)
 	}
 
 	return updated, nil

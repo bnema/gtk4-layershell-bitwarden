@@ -75,6 +75,9 @@ func (f *fakeAuthService) UnlockWithPIN(_ context.Context, email, pin string) er
 	f.pin = pin
 	return nil
 }
+func (f *fakeAuthService) UnlockAndCreateEnvelope(ctx context.Context, email, password, pin string, prompt coreauth.TwoFactorPrompt) error {
+	return f.UnlockWithPIN(ctx, email, pin)
+}
 func (f *fakeAuthService) Lock(context.Context) error { return nil }
 func (f *fakeAuthService) Search(context.Context, string, int) ([]vault.ScoredItem, error) {
 	return nil, nil
@@ -127,8 +130,8 @@ func TestLoginDoesNotPrintBWSessionAndRequiresPIN(t *testing.T) {
 		},
 	}
 
-	// Feed email (already in args), password (args), and PIN via stdin.
-	stdin := strings.NewReader("1234\n")
+	// Feed email (already in args), password (args), PIN, and PIN confirmation via stdin.
+	stdin := strings.NewReader("1234\n1234\n")
 	root := NewRootCommand(opts)
 	root.SetArgs([]string{"login", "me@example.com", "master-password", "--raw", "--no-sync", "--region", "us"})
 	root.SetIn(stdin)
@@ -167,7 +170,7 @@ func TestLoginSavesRegionAndSelfHostedServerURL(t *testing.T) {
 		},
 	}
 
-	stdin := strings.NewReader("1234\n")
+	stdin := strings.NewReader("1234\n1234\n")
 	root := NewRootCommand(opts)
 	root.SetArgs([]string{"login", "me@example.com", "master-password", "--raw", "--no-sync", "--region", "self_hosted", "--server-url", "https://bitwarden.example.com"})
 	root.SetIn(stdin)
@@ -212,8 +215,8 @@ func TestLoginPromptsForAuthenticatorCode(t *testing.T) {
 			return fake, nil
 		},
 	}
-	// Input: first line is PIN, second line is 2FA code (PIN prompted before Login).
-	stdin := strings.NewReader("9999\n123456\n")
+	// Input: PIN, PIN confirmation, then 2FA code.
+	stdin := strings.NewReader("9999\n9999\n123456\n")
 	root := NewRootCommand(opts)
 	root.SetArgs([]string{"login", "me@example.com", "master-password", "--raw", "--no-sync", "--region", "us"})
 	root.SetIn(stdin)
@@ -232,6 +235,7 @@ func TestUnlockUsesConfiguredEmailAndPIN(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.toml")
 	fake := newFakeAuthService()
+	fake.authStatus = session.LoggedInUnlockAvailable
 	opts := Options{
 		ConfigPath: configPath,
 		ComposeService: func(context.Context, *coreconfig.Config, string, string) (in.AppService, error) {
@@ -263,6 +267,7 @@ func TestUnlockPromptsPINFromStdin(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.toml")
 	fake := newFakeAuthService()
+	fake.authStatus = session.LoggedInUnlockAvailable
 	opts := Options{
 		ConfigPath: configPath,
 		ComposeService: func(context.Context, *coreconfig.Config, string, string) (in.AppService, error) {
@@ -416,4 +421,143 @@ func TestLayerShellUnavailableSuggestsCLIAuth(t *testing.T) {
 	_, err := executeCmd(t, opts, []string{})
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "gtk4-layershell-bitwarden login")
+}
+
+// TestUnlockDoesNotConsumePINStdinWhenKeyringUnavailable verifies that
+// unlock fails fast on keyring-unavailable without consuming PIN from stdin.
+func TestUnlockDoesNotConsumePINStdinWhenKeyringUnavailable(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.toml")
+	fake := &fakeAuthService{
+		events:     make(chan in.Event, 4),
+		authStatus: session.KeyringUnavailable,
+		authStatusErr: &cerrors.Error{
+			Kind:    cerrors.KindValidation,
+			Op:      "credentials.CheckAvailable",
+			Message: "secret service not available",
+		},
+	}
+	opts := Options{
+		ConfigPath: configPath,
+		ComposeService: func(context.Context, *coreconfig.Config, string, string) (in.AppService, error) {
+			return fake, nil
+		},
+	}
+
+	// Set up email in config.
+	_, err := executeCmd(t, opts, []string{"config", "set", "bitwarden.email", "me@example.com"})
+	require.NoError(t, err)
+
+	// Provide PIN via stdin — it should NOT be consumed since keyring check
+	// fails first.
+	stdin := strings.NewReader("9999\n")
+	root := NewRootCommand(opts)
+	root.SetArgs([]string{"unlock", "--raw", "--no-sync"})
+	root.SetIn(stdin)
+	out := new(bytes.Buffer)
+	root.SetOut(out)
+	root.SetErr(new(bytes.Buffer))
+
+	err = root.ExecuteContext(context.Background())
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "secret service not available")
+
+	// Verify PIN was NOT consumed (should not have been passed to UnlockWithPIN).
+	require.Empty(t, fake.pin, "PIN should not be consumed when keyring is unavailable")
+}
+
+// TestUnlockDoesNotConsumePINWhenUnauthenticated verifies that
+// unlock fails fast on unauthenticated without consuming PIN from stdin.
+func TestUnlockDoesNotConsumePINWhenUnauthenticated(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.toml")
+	fake := newFakeAuthService() // authStatus defaults to Unauthenticated
+	opts := Options{
+		ConfigPath: configPath,
+		ComposeService: func(context.Context, *coreconfig.Config, string, string) (in.AppService, error) {
+			return fake, nil
+		},
+	}
+
+	_, err := executeCmd(t, opts, []string{"config", "set", "bitwarden.email", "me@example.com"})
+	require.NoError(t, err)
+
+	// Provide PIN via stdin — it should NOT be consumed since status check fails first.
+	stdin := strings.NewReader("9999\n")
+	root := NewRootCommand(opts)
+	root.SetArgs([]string{"unlock", "--raw", "--no-sync"})
+	root.SetIn(stdin)
+	out := new(bytes.Buffer)
+	root.SetOut(out)
+	root.SetErr(new(bytes.Buffer))
+
+	err = root.ExecuteContext(context.Background())
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "not logged in")
+
+	// Verify PIN was NOT consumed.
+	require.Empty(t, fake.pin, "PIN should not be consumed when unauthenticated")
+}
+
+// TestUnlockDoesNotConsumePINWhenLoggedInLocked verifies that
+// unlock fails fast on LoggedInLocked without consuming PIN from stdin.
+func TestUnlockDoesNotConsumePINWhenLoggedInLocked(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.toml")
+	fake := newFakeAuthService()
+	fake.authStatus = session.LoggedInLocked
+	opts := Options{
+		ConfigPath: configPath,
+		ComposeService: func(context.Context, *coreconfig.Config, string, string) (in.AppService, error) {
+			return fake, nil
+		},
+	}
+
+	_, err := executeCmd(t, opts, []string{"config", "set", "bitwarden.email", "me@example.com"})
+	require.NoError(t, err)
+
+	// Provide PIN via stdin — it should NOT be consumed since status check fails first.
+	stdin := strings.NewReader("9999\n")
+	root := NewRootCommand(opts)
+	root.SetArgs([]string{"unlock", "--raw", "--no-sync"})
+	root.SetIn(stdin)
+	out := new(bytes.Buffer)
+	root.SetOut(out)
+	root.SetErr(new(bytes.Buffer))
+
+	err = root.ExecuteContext(context.Background())
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "no local unlock envelope")
+
+	// Verify PIN was NOT consumed.
+	require.Empty(t, fake.pin, "PIN should not be consumed when logged-in-locked")
+}
+
+// TestLoginRejectsMismatchedPINConfirmation verifies that interactive PIN
+// entry during login rejects mismatched confirmation.
+func TestLoginRejectsMismatchedPINConfirmation(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.toml")
+	fake := newFakeAuthService()
+	opts := Options{
+		ConfigPath: configPath,
+		ComposeService: func(context.Context, *coreconfig.Config, string, string) (in.AppService, error) {
+			return fake, nil
+		},
+	}
+
+	// PIN "1234" and confirmation "5678" don't match.
+	stdin := strings.NewReader("1234\n5678\n")
+	root := NewRootCommand(opts)
+	root.SetArgs([]string{"login", "me@example.com", "master-password", "--raw", "--no-sync", "--region", "us"})
+	root.SetIn(stdin)
+	root.SetOut(new(bytes.Buffer))
+	root.SetErr(new(bytes.Buffer))
+
+	err := root.ExecuteContext(context.Background())
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "PINs do not match")
+
+	// Login should NOT have been called on the service.
+	require.Empty(t, fake.pin, "PIN should not be forwarded when confirmation mismatches")
 }

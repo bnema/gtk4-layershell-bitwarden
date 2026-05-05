@@ -173,3 +173,17 @@ func TestBack_UnlockModesNoOp(t *testing.T) {
 		require.Equal(t, mode, s.Mode, "Back should not change mode from unlock/keyring modes")
 	}
 }
+
+func TestBack_PINSetup(t *testing.T) {
+	s := NewState()
+	s.Mode = ModePINSetup
+	s.Back()
+	require.Equal(t, ModeUnlock, s.Mode, "Back from PINSetup should go to ModeUnlock")
+}
+
+func TestBack_PINConfirm(t *testing.T) {
+	s := NewState()
+	s.Mode = ModePINConfirm
+	s.Back()
+	require.Equal(t, ModePINSetup, s.Mode, "Back from PINConfirm should go to ModePINSetup")
+}

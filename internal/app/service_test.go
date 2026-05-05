@@ -404,6 +404,7 @@ type fakeCredentialStore struct {
 	loadTokenErr     error
 	loadTokenCalls   int
 	saveTokenCalled  int
+	saveTokenErr     error
 	delTokenCalls    int
 
 	envelope            session.UnlockEnvelope
@@ -428,6 +429,9 @@ func (cs *fakeCredentialStore) SaveTokenBundle(_ context.Context, _ session.Acco
 	defer cs.mu.Unlock()
 	cs.saveTokenCalled++
 	cs.savedTokenBundle = bundle
+	if cs.saveTokenErr != nil {
+		return cs.saveTokenErr
+	}
 	return nil
 }
 
@@ -2973,5 +2977,339 @@ func TestItemsDoesNotLeavePlaintextItemsResidentAfterOperation(t *testing.T) {
 	svc.mu.Lock()
 	require.Nil(t, svc.items, "s.items should be nil after cache-only Items")
 	require.Nil(t, svc.index, "s.index should be nil after cache-only Items")
+	svc.mu.Unlock()
+}
+
+// ---------------------------------------------------------------------------
+// Login atomicity tests (finding #2)
+// ---------------------------------------------------------------------------
+
+func TestLoginSaveTokenBundleFailureLeavesLocked(t *testing.T) {
+	email := "user@example.com"
+	password := "master-password"
+	pin := "1234"
+	bootID := "boot-abc"
+
+	fr := &fakeRemote{
+		exportMaterial: session.UnlockMaterial{UserKey: []byte("user-key-bytes")},
+		exportTokens: session.TokenBundle{
+			AccountID:    "acct-1",
+			AccessToken:  []byte("access-token"),
+			RefreshToken: []byte("refresh-token"),
+			TokenType:    "Bearer",
+			ExpiresAt:    time.Now().Add(time.Hour),
+		},
+	}
+
+	saveTokenErr := fmt.Errorf("keyring write error")
+	cs := &fakeCredentialStore{saveTokenErr: saveTokenErr}
+	pe := &fakePINEnvelope{
+		result: session.UnlockEnvelope{Version: session.UnlockEnvelopeVersion, BootID: bootID},
+	}
+	boot := &fakeBootID{id: bootID}
+	fakCache := &fakeCache{loadErr: os.ErrNotExist}
+
+	svc := NewService(Deps{
+		Remote:      fr,
+		Cache:       fakCache,
+		SecretBox:   &fakeSecretBox{},
+		Credentials: cs,
+		BootID:      boot,
+		PINEnvelope: pe,
+		Config:      coreconfig.Default(),
+	})
+
+	input := auth.LoginInput{
+		Email:    email,
+		Password: password,
+		PIN:      pin,
+	}
+
+	err := svc.Login(context.Background(), input)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "save token bundle")
+
+	// Service should be locked after cleanup.
+	svc.mu.Lock()
+	require.Equal(t, auth.LockStateLocked, svc.state)
+	svc.mu.Unlock()
+
+	// Remote lock should have been called (from cleanup Lock).
+	fr.mu.Lock()
+	require.True(t, fr.lockCalled, "remote Lock should be called during cleanup")
+	fr.mu.Unlock()
+}
+
+func TestLoginSaveEnvelopeFailureLeavesLockedAndClearsTokenBundle(t *testing.T) {
+	email := "user@example.com"
+	password := "master-password"
+	pin := "1234"
+	bootID := "boot-abc"
+
+	fr := &fakeRemote{
+		exportMaterial: session.UnlockMaterial{UserKey: []byte("user-key-bytes")},
+		exportTokens: session.TokenBundle{
+			AccountID:    "acct-1",
+			AccessToken:  []byte("access-token"),
+			RefreshToken: []byte("refresh-token"),
+			TokenType:    "Bearer",
+			ExpiresAt:    time.Now().Add(time.Hour),
+		},
+	}
+
+	saveEnvelopeErr := fmt.Errorf("keyring write error")
+	cs := &fakeCredentialStore{saveEnvelopeErr: saveEnvelopeErr}
+	pe := &fakePINEnvelope{
+		result: session.UnlockEnvelope{Version: session.UnlockEnvelopeVersion, BootID: bootID},
+	}
+	boot := &fakeBootID{id: bootID}
+	fakCache := &fakeCache{loadErr: os.ErrNotExist}
+
+	svc := NewService(Deps{
+		Remote:      fr,
+		Cache:       fakCache,
+		SecretBox:   &fakeSecretBox{},
+		Credentials: cs,
+		BootID:      boot,
+		PINEnvelope: pe,
+		Config:      coreconfig.Default(),
+	})
+
+	input := auth.LoginInput{
+		Email:    email,
+		Password: password,
+		PIN:      pin,
+	}
+
+	err := svc.Login(context.Background(), input)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "save unlock envelope")
+
+	// Service should be locked after cleanup.
+	svc.mu.Lock()
+	require.Equal(t, auth.LockStateLocked, svc.state)
+	svc.mu.Unlock()
+
+	// Token bundle should have been deleted (best-effort cleanup in Login).
+	cs.mu.Lock()
+	require.Equal(t, 1, cs.delTokenCalls, "token bundle should be deleted on envelope save failure")
+	cs.mu.Unlock()
+}
+
+func TestEnsureFreshTokensSaveFailureReturnsError(t *testing.T) {
+	ref := session.AccountRef{
+		Email:     "user@example.com",
+		ServerURL: "https://vault.bitwarden.com",
+	}
+
+	nearExpiryBundle := session.TokenBundle{
+		AccountID:    "acct-1",
+		Email:        ref.Email,
+		ServerURL:    ref.ServerURL,
+		AccessToken:  []byte("old-at"),
+		RefreshToken: []byte("old-rt"),
+		TokenType:    "Bearer",
+		ExpiresAt:    time.Now().Add(time.Minute), // within 2 min, triggers refresh
+	}
+
+	updatedBundle := session.TokenBundle{
+		AccountID:    "acct-1",
+		AccessToken:  []byte("new-at"),
+		RefreshToken: []byte("new-rt"),
+		TokenType:    "Bearer",
+		ExpiresAt:    time.Now().Add(time.Hour),
+	}
+
+	saveTokenErr := fmt.Errorf("keyring write error")
+	cs := &fakeCredentialStore{
+		tokenBundle:  nearExpiryBundle,
+		saveTokenErr: saveTokenErr,
+	}
+	fr := &fakeRemote{refreshTokenBundleResult: updatedBundle}
+
+	svc := NewService(Deps{
+		Config:      coreconfig.Default(),
+		Credentials: cs,
+		Remote:      fr,
+	})
+
+	_, err := svc.ensureFreshTokens(context.Background(), ref)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "save refreshed token bundle")
+}
+
+func TestLoginRejectsShortPIN(t *testing.T) {
+	newService := func() (*Service, *fakeRemote) {
+		fr := &fakeRemote{}
+		cs := &fakeCredentialStore{}
+		pe := &fakePINEnvelope{
+			result: session.UnlockEnvelope{Version: session.UnlockEnvelopeVersion},
+		}
+		boot := &fakeBootID{id: "boot-xyz"}
+		fakCache := &fakeCache{loadErr: os.ErrNotExist}
+
+		svc := NewService(Deps{
+			Remote:      fr,
+			Cache:       fakCache,
+			SecretBox:   &fakeSecretBox{},
+			Credentials: cs,
+			BootID:      boot,
+			PINEnvelope: pe,
+			Config:      coreconfig.Default(),
+		})
+		return svc, fr
+	}
+
+	t.Run("3-char PIN rejected", func(t *testing.T) {
+		svc, fr := newService()
+		input := auth.LoginInput{
+			Email:    "user@example.com",
+			Password: "master-password",
+			PIN:      "123",
+		}
+		err := svc.Login(context.Background(), input)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "PIN must be at least 4 characters")
+
+		// Remote login should NOT have been called.
+		fr.mu.Lock()
+		require.False(t, fr.loginCalled, "remote login should not be called with short PIN")
+		fr.mu.Unlock()
+	})
+
+	t.Run("4-char PIN accepted", func(t *testing.T) {
+		svc, _ := newService()
+		input := auth.LoginInput{
+			Email:    "user@example.com",
+			Password: "master-password",
+			PIN:      "1234",
+		}
+		err := svc.Login(context.Background(), input)
+		require.NoError(t, err)
+	})
+
+	t.Run("empty PIN rejected", func(t *testing.T) {
+		svc, _ := newService()
+		input := auth.LoginInput{
+			Email:    "user@example.com",
+			Password: "master-password",
+			PIN:      "",
+		}
+		err := svc.Login(context.Background(), input)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "PIN is required")
+	})
+}
+
+// ---------------------------------------------------------------------------
+// UnlockAndCreateEnvelope tests (finding #1)
+// ---------------------------------------------------------------------------
+
+func TestUnlockAndCreateEnvelopeStoresBundleAndEnvelope(t *testing.T) {
+	email := "user@example.com"
+	password := "master-password"
+	pin := "1234"
+	ref := session.AccountRef{Email: email, ServerURL: "https://vault.bitwarden.com"}
+	bootID := "boot-abc"
+
+	fr := &fakeRemote{
+		exportMaterial: session.UnlockMaterial{UserKey: []byte("user-key-bytes")},
+		exportTokens: session.TokenBundle{
+			AccountID:    "acct-1",
+			AccessToken:  []byte("access-token"),
+			RefreshToken: []byte("refresh-token"),
+			TokenType:    "Bearer",
+			ExpiresAt:    time.Now().Add(time.Hour),
+		},
+	}
+
+	cs := &fakeCredentialStore{}
+	pe := &fakePINEnvelope{
+		result: session.UnlockEnvelope{Version: session.UnlockEnvelopeVersion, BootID: bootID},
+	}
+	boot := &fakeBootID{id: bootID}
+	fakCache := &fakeCache{loadErr: os.ErrNotExist}
+
+	svc := NewService(Deps{
+		Remote:      fr,
+		Cache:       fakCache,
+		SecretBox:   &fakeSecretBox{},
+		Credentials: cs,
+		BootID:      boot,
+		PINEnvelope: pe,
+		Config:      coreconfig.Default(),
+	})
+
+	err := svc.UnlockAndCreateEnvelope(context.Background(), email, password, pin, nil)
+	require.NoError(t, err)
+
+	// Verify remote login was called.
+	fr.mu.Lock()
+	require.True(t, fr.loginCalled)
+	fr.mu.Unlock()
+
+	// Verify ExportSession was called.
+	require.Equal(t, int32(1), fr.exportCallCnt.Load())
+
+	// Token bundle should be saved.
+	cs.mu.Lock()
+	require.Equal(t, 1, cs.saveTokenCalled)
+	require.Equal(t, 1, cs.saveEnvCalled)
+	cs.mu.Unlock()
+
+	// PIN envelope should have been created with correct parameters.
+	pe.mu.Lock()
+	require.Equal(t, 1, pe.createCallCnt)
+	require.Equal(t, ref, pe.ref)
+	require.Equal(t, pin, pe.pin)
+	require.Equal(t, bootID, pe.bootID)
+	pe.mu.Unlock()
+
+	// Service should remain unlocked (post-enrollment, no error).
+	svc.mu.Lock()
+	require.Equal(t, auth.LockStateUnlocked, svc.state)
+	svc.mu.Unlock()
+}
+
+func TestUnlockAndCreateEnvelopeFailSavesLeavesLocked(t *testing.T) {
+	email := "user@example.com"
+	password := "master-password"
+	pin := "1234"
+	bootID := "boot-abc"
+
+	fr := &fakeRemote{
+		exportMaterial: session.UnlockMaterial{UserKey: []byte("user-key-bytes")},
+		exportTokens: session.TokenBundle{
+			AccountID:    "acct-1",
+			AccessToken:  []byte("access-token"),
+			RefreshToken: []byte("refresh-token"),
+			TokenType:    "Bearer",
+			ExpiresAt:    time.Now().Add(time.Hour),
+		},
+	}
+
+	cs := &fakeCredentialStore{saveTokenErr: fmt.Errorf("keyring write error")}
+	pe := &fakePINEnvelope{
+		result: session.UnlockEnvelope{Version: session.UnlockEnvelopeVersion, BootID: bootID},
+	}
+	boot := &fakeBootID{id: bootID}
+	fakCache := &fakeCache{loadErr: os.ErrNotExist}
+
+	svc := NewService(Deps{
+		Remote:      fr,
+		Cache:       fakCache,
+		SecretBox:   &fakeSecretBox{},
+		Credentials: cs,
+		BootID:      boot,
+		PINEnvelope: pe,
+		Config:      coreconfig.Default(),
+	})
+
+	err := svc.UnlockAndCreateEnvelope(context.Background(), email, password, pin, nil)
+	require.Error(t, err)
+
+	// Service should be locked after cleanup.
+	svc.mu.Lock()
+	require.Equal(t, auth.LockStateLocked, svc.state)
 	svc.mu.Unlock()
 }

@@ -45,6 +45,12 @@ type View struct {
 	searchTimer *time.Timer
 	searchLock  sync.Mutex
 
+	// tempMasterPassword and tempPIN hold sensitive values during the
+	// LoggedInLocked PIN enrollment flow. They are cleared after
+	// UnlockAndCreateEnvelope succeeds or fails.
+	tempMasterPassword string
+	tempPIN            string
+
 	dynamicHandlers []dynamicHandler
 }
 
@@ -161,6 +167,10 @@ func (v *View) buildUI() {
 			v.doUnlock(context.Background())
 		case ModePINUnlock:
 			v.doPINUnlock(context.Background())
+		case ModePINSetup:
+			v.doPINSetup()
+		case ModePINConfirm:
+			v.doPINConfirm()
 			// ModeKeyringError: no-op on enter.
 		}
 	}
@@ -267,6 +277,38 @@ func (v *View) AttachKeyController(window *gtklib.Window) {
 			return false
 		}
 
+		handlePINSetup := func() bool {
+			switch kv {
+			case gdk.KEY_Escape:
+				// Clear temp fields only when backing out to ModeUnlock
+				// (ModePINSetup → ModeUnlock), not ModePINConfirm → ModePINSetup.
+				backToUnlock := v.state.Mode == ModePINSetup
+				v.state.Back()
+				if backToUnlock {
+					v.clearTempFields()
+				}
+				v.mu.Unlock()
+				idleAddOnce(func() {
+					if backToUnlock {
+						placeholder := "Master password"
+						v.passwordEntry.SetPlaceholderText(&placeholder)
+						v.passwordEntry.SetVisibility(false)
+					} else {
+						// Back to PINSetup: restore PIN entry mode.
+						placeholder := "New PIN (4+ characters)"
+						v.passwordEntry.SetPlaceholderText(&placeholder)
+					}
+					v.passwordEntry.SetText("")
+					v.showError("")
+					v.render()
+				})
+				return true
+			default:
+				v.mu.Unlock()
+				return false
+			}
+		}
+
 		handleSearch := func() bool {
 			switch kv {
 			case gdk.KEY_Up:
@@ -339,6 +381,8 @@ func (v *View) AttachKeyController(window *gtklib.Window) {
 		switch mode {
 		case ModeUnlock, ModePINUnlock, ModeKeyringError:
 			return handleUnlock()
+		case ModePINSetup, ModePINConfirm:
+			return handlePINSetup()
 		case ModeSearch:
 			return handleSearch()
 		case ModeDetail:
@@ -361,7 +405,7 @@ func (v *View) GrabFocus() {
 	defer v.mu.Unlock()
 
 	switch v.state.Mode {
-	case ModeUnlock, ModePINUnlock, ModeKeyringError:
+	case ModeUnlock, ModePINUnlock, ModeKeyringError, ModePINSetup, ModePINConfirm:
 		if v.emailEntry.GetText() == "" {
 			v.emailEntry.GrabFocus()
 		} else {
@@ -387,15 +431,23 @@ func (v *View) showUnlock() {
 	v.state.Mode = ModeUnlock
 }
 
+// clearTempFields zeroes the temporarily stored master password and PIN.
+// Caller must hold v.mu.
+func (v *View) clearTempFields() {
+	v.tempMasterPassword = ""
+	v.tempPIN = ""
+}
+
 // doUnlock runs the unlock flow.
+//
+// When NeedReLogin (LoggedInLocked) the GUI initiates a staged PIN
+// enrollment: master password → PIN → confirm → UnlockAndCreateEnvelope.
+// When not NeedReLogin (Unauthenticated) the GUI shows CLI login guidance
+// since raw Unlock is blocked and we don't have a login form.
 func (v *View) doUnlock(ctx context.Context) {
 	v.mu.Lock()
 	needReLogin := v.state.NeedReLogin
 	v.mu.Unlock()
-	if needReLogin {
-		v.showError("Local unlock envelope missing. Please run `login` from the terminal to recreate it.")
-		return
-	}
 
 	email := v.emailEntry.GetText()
 	password := v.passwordEntry.GetText()
@@ -405,23 +457,117 @@ func (v *View) doUnlock(ctx context.Context) {
 		return
 	}
 
+	if !needReLogin {
+		// Unauthenticated: no login form; guide user to CLI.
+		v.showError("Not logged in. Please run `gtk4-layershell-bitwarden login <email>` from the terminal to create PIN-protected access, then restart the overlay.")
+		return
+	}
+
+	// LoggedInLocked with NeedReLogin: start PIN enrollment flow.
+	v.showError("")
+
+	// Store master password temporarily for UnlockAndCreateEnvelope call.
+	v.mu.Lock()
+	v.tempMasterPassword = password
+	v.state.Mode = ModePINSetup
+	v.mu.Unlock()
+
+	// Switch the password entry for PIN input.
+	idleAddOnce(func() {
+		placeholder := "New PIN (4+ characters)"
+		v.passwordEntry.SetPlaceholderText(&placeholder)
+		v.passwordEntry.SetVisibility(false)
+		v.passwordEntry.SetText("")
+		v.passwordEntry.GrabFocus()
+	})
+}
+
+// doPINSetup validates the new PIN from the password entry and transitions to
+// ModePINConfirm for confirmation.
+func (v *View) doPINSetup() {
+	pin := v.passwordEntry.GetText()
+	if pin == "" {
+		v.showError("PIN is required")
+		return
+	}
+	if len(pin) < 4 {
+		v.showError("PIN must be at least 4 characters")
+		return
+	}
+
+	v.showError("")
+
+	v.mu.Lock()
+	v.tempPIN = pin
+	v.state.Mode = ModePINConfirm
+	v.mu.Unlock()
+
+	idleAddOnce(func() {
+		placeholder := "Confirm PIN"
+		v.passwordEntry.SetPlaceholderText(&placeholder)
+		v.passwordEntry.SetText("")
+		v.passwordEntry.GrabFocus()
+	})
+}
+
+// doPINConfirm verifies the PIN confirmation matches the stored PIN and calls
+// UnlockAndCreateEnvelope. On success enters search mode; on failure clears
+// temp fields and returns to ModeUnlock.
+func (v *View) doPINConfirm() {
+	confirm := v.passwordEntry.GetText()
+
+	v.mu.Lock()
+	storedPIN := v.tempPIN
+	masterPassword := v.tempMasterPassword
+	v.mu.Unlock()
+
+	if confirm != storedPIN {
+		v.showError("PINs do not match")
+		// Go back to PIN entry so user can retry.
+		v.mu.Lock()
+		v.state.Mode = ModePINSetup
+		v.mu.Unlock()
+		idleAddOnce(func() {
+			placeholder := "New PIN (4+ characters)"
+			v.passwordEntry.SetPlaceholderText(&placeholder)
+			v.passwordEntry.SetText("")
+			v.passwordEntry.GrabFocus()
+		})
+		return
+	}
+
+	email := v.emailEntry.GetText()
 	v.showError("")
 
 	go func() {
-		unlockErr := v.service.Unlock(ctx, email, password)
-		if unlockErr != nil {
-			v.showError(unlockErr.Error())
+		err := v.service.UnlockAndCreateEnvelope(context.Background(), email, masterPassword, storedPIN, nil)
+
+		// Clear temp fields regardless of outcome.
+		v.mu.Lock()
+		v.clearTempFields()
+		v.mu.Unlock()
+
+		if err != nil {
+			v.showError(err.Error())
+			// Return to ModeUnlock on failure.
+			idleAddOnce(func() {
+				placeholder := "Master password"
+				v.passwordEntry.SetPlaceholderText(&placeholder)
+				v.passwordEntry.SetVisibility(false)
+				v.passwordEntry.SetText("")
+				v.mu.Lock()
+				v.state.Mode = ModeUnlock
+				v.mu.Unlock()
+				v.render()
+			})
 			return
 		}
 
-		// Check context cancellation before scheduling UI updates.
-		select {
-		case <-ctx.Done():
-			return
-		default:
-		}
-
+		// Success: enter search mode like doPINUnlock.
 		idleAddOnce(func() {
+			placeholder := "Master password"
+			v.passwordEntry.SetPlaceholderText(&placeholder)
+			v.passwordEntry.SetVisibility(false)
 			v.passwordEntry.SetText("")
 
 			v.mu.Lock()
@@ -622,7 +768,7 @@ func (v *View) render() {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 
-	v.unlockBox.SetVisible(v.state.Mode == ModeUnlock || v.state.Mode == ModePINUnlock || v.state.Mode == ModeKeyringError)
+	v.unlockBox.SetVisible(v.state.Mode == ModeUnlock || v.state.Mode == ModePINUnlock || v.state.Mode == ModeKeyringError || v.state.Mode == ModePINSetup || v.state.Mode == ModePINConfirm)
 	v.searchBox.SetVisible(v.state.Mode == ModeSearch)
 	v.detailBox.SetVisible(v.state.Mode == ModeDetail)
 	v.formBox.SetVisible(v.state.Mode == ModeForm)

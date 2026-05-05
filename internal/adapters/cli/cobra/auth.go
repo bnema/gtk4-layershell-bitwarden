@@ -132,9 +132,21 @@ func runLogin(cmd *cobra.Command, opts Options, cachePath, outboxPath string, ar
 		return err
 	}
 
-	pin, err := promptPIN(cmd.InOrStdin(), cmd.ErrOrStderr())
-	if err != nil {
-		return err
+	// Resolve PIN: --pinenv/--pinfile skip interactive confirmation (Service.Login
+	// still enforces min length). Interactive entry requires confirmation.
+	// Note: Master password flags (--passwordenv/--passwordfile) do NOT trigger
+	// this shortcut so PIN confirmation is not silently skipped.
+	var pin string
+	if auth.pinEnv != "" || auth.pinFile != "" {
+		pin, err = resolvePIN(cmd, nil, auth)
+		if err != nil {
+			return err
+		}
+	} else {
+		pin, err = promptPINWithConfirm(cmd.InOrStdin(), cmd.ErrOrStderr())
+		if err != nil {
+			return err
+		}
 	}
 
 	loginInput := coreauth.LoginInput{
@@ -171,17 +183,39 @@ func runUnlock(cmd *cobra.Command, opts Options, cachePath, outboxPath string, a
 		return fmt.Errorf("no configured email; run `gtk4-layershell-bitwarden login <email>` first or set bitwarden.email")
 	}
 
-	// Resolve PIN from args, env, file, or prompt (not master password).
-	pin, err := resolvePIN(cmd, args, auth)
-	if err != nil {
-		return err
-	}
-
+	// Compose service and fail-fast on keyring-unavailable BEFORE consuming
+	// PIN stdin (avoid consuming input when unlock is impossible).
 	svc, err := composeAppService(opts, cmd.Context(), cfg, cachePath, outboxPath)
 	if err != nil {
 		return fmt.Errorf("compose service: %w", err)
 	}
 	defer func() { _ = svc.Shutdown(context.Background()) }()
+
+	status, statusErr := svc.AuthStatus(cmd.Context(), email)
+	if statusErr != nil {
+		return fmt.Errorf("auth status: %w", statusErr)
+	}
+
+	// Fail-fast for any state where PIN unlock cannot succeed, before
+	// consuming stdin.
+	switch status {
+	case session.KeyringUnavailable:
+		return fmt.Errorf("secret service is required for unlock")
+	case session.Unauthenticated:
+		return fmt.Errorf("not logged in; run `gtk4-layershell-bitwarden login <email>` first")
+	case session.LoggedInLocked:
+		return fmt.Errorf("no local unlock envelope; run `gtk4-layershell-bitwarden login <email>` to create a PIN envelope")
+	case session.LoggedInUnlockAvailable:
+		// Only proceed to read PIN when unlock is possible.
+	default:
+		return fmt.Errorf("unknown auth status %q", status)
+	}
+
+	// Resolve PIN from args, env, file, or prompt (not master password).
+	pin, err := resolvePIN(cmd, args, auth)
+	if err != nil {
+		return err
+	}
 
 	if err := svc.UnlockWithPIN(cmd.Context(), email, pin); err != nil {
 		return err
@@ -359,6 +393,24 @@ func promptLine(in io.Reader, errOut io.Writer, prompt string) (string, error) {
 
 func promptPIN(in io.Reader, errOut io.Writer) (string, error) {
 	return promptLine(in, errOut, "Local unlock PIN: ")
+}
+
+// promptPINWithConfirm prompts for a PIN interactively and requires a
+// matching confirmation before returning. Mismatch is rejected before any
+// remote login.
+func promptPINWithConfirm(in io.Reader, errOut io.Writer) (string, error) {
+	pin, err := promptPIN(in, errOut)
+	if err != nil {
+		return "", err
+	}
+	confirm, err := promptLine(in, errOut, "Confirm PIN: ")
+	if err != nil {
+		return "", err
+	}
+	if pin != confirm {
+		return "", fmt.Errorf("PINs do not match")
+	}
+	return pin, nil
 }
 
 func promptPassword(in io.Reader, errOut io.Writer) (string, error) {
