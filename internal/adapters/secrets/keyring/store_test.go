@@ -166,6 +166,34 @@ func TestStoreUnlockEnvelopeRoundTrip(t *testing.T) {
 	assert.True(t, envelope.BackoffUntil.Equal(loaded.BackoffUntil))
 }
 
+func TestStorePINProfileRoundTrip(t *testing.T) {
+	fake := newFakeBackend()
+	store := NewForBackend(fake)
+	ctx := context.Background()
+
+	saveRef := ref(t, "User@Example.com", "https://vault.bitwarden.com/")
+	loadRef := ref(t, "user@example.com", "https://vault.bitwarden.com")
+	profile, err := session.NewPINProfile(saveRef, "acct-1", "1234", time.Now())
+	require.NoError(t, err)
+
+	require.NoError(t, store.SavePINProfile(ctx, saveRef, profile))
+
+	loaded, err := store.LoadPINProfile(ctx, loadRef)
+	require.NoError(t, err)
+	assert.Equal(t, "acct-1", loaded.AccountID)
+	assert.Equal(t, "user@example.com", loaded.Email)
+	assert.Equal(t, "https://vault.bitwarden.com", loaded.ServerURL)
+	assert.True(t, loaded.VerifyPIN("1234"))
+	assert.Len(t, loaded.EnvelopeKey, session.EnvelopeKeySize)
+}
+
+func TestStorePINProfileDeleteMissingIsNoop(t *testing.T) {
+	fake := newFakeBackend()
+	store := NewForBackend(fake)
+	err := store.DeletePINProfile(context.Background(), ref(t, "missing@example.com", "https://vault.example.com"))
+	require.NoError(t, err)
+}
+
 func TestCheckAvailableTouchesBackendBeforeLogin(t *testing.T) {
 	fake := newFakeBackend()
 	store := NewForBackend(fake)
@@ -292,6 +320,27 @@ func TestStoreContextCancelled(t *testing.T) {
 				return s.DeleteUnlockEnvelope(ctx, ref)
 			},
 		},
+		{
+			name: "SavePINProfile",
+			call: func(s *Store, ctx context.Context, ref session.AccountRef) error {
+				profile, err := session.NewPINProfile(ref, "acct-1", "1234", time.Now())
+				require.NoError(t, err)
+				return s.SavePINProfile(ctx, ref, profile)
+			},
+		},
+		{
+			name: "LoadPINProfile",
+			call: func(s *Store, ctx context.Context, ref session.AccountRef) error {
+				_, err := s.LoadPINProfile(ctx, ref)
+				return err
+			},
+		},
+		{
+			name: "DeletePINProfile",
+			call: func(s *Store, ctx context.Context, ref session.AccountRef) error {
+				return s.DeletePINProfile(ctx, ref)
+			},
+		},
 	}
 
 	for _, m := range methods {
@@ -335,6 +384,11 @@ func TestLoadMissingMapsNotFound(t *testing.T) {
 
 	_, err = store.LoadUnlockEnvelope(ctx, acctRef)
 	require.Error(t, err, "LoadUnlockEnvelope should fail for missing credential")
+	assert.True(t, errors.Is(err, coreerrors.ErrNotFound),
+		"error should be ErrNotFound")
+
+	_, err = store.LoadPINProfile(ctx, acctRef)
+	require.Error(t, err, "LoadPINProfile should fail for missing credential")
 	assert.True(t, errors.Is(err, coreerrors.ErrNotFound),
 		"error should be ErrNotFound")
 }

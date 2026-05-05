@@ -208,8 +208,8 @@ func deleteUnlockEnvelopeForConfig(ctx context.Context, store out.CredentialStor
 	return nil
 }
 
-// deleteCredentialsForConfig checks keyring availability and deletes both the
-// unlock envelope and token bundle for the configured account.
+// deleteCredentialsForConfig checks keyring availability and deletes the
+// unlock envelope, token bundle, and PIN profile for the configured account.
 func deleteCredentialsForConfig(ctx context.Context, store out.CredentialStore, cfg *coreconfig.Config) error {
 	if err := store.CheckAvailable(ctx); err != nil {
 		return fmt.Errorf("check credential store: %w", err)
@@ -220,6 +220,9 @@ func deleteCredentialsForConfig(ctx context.Context, store out.CredentialStore, 
 	}
 	if err := store.DeleteTokenBundle(ctx, ref); err != nil {
 		return fmt.Errorf("delete token bundle: %w", err)
+	}
+	if err := store.DeletePINProfile(ctx, ref); err != nil {
+		return fmt.Errorf("delete pin profile: %w", err)
 	}
 	return nil
 }

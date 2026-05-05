@@ -59,3 +59,15 @@ type LoginInput struct {
 	PIN             string
 	TwoFactorPrompt TwoFactorPrompt
 }
+
+// RenewEnvelopeInput contains the parameters for RenewUnlockEnvelope.
+// When an existing PIN profile is present, only Email and Password are
+// required (PIN is ignored). When no profile exists, SetupNewPIN must be
+// true and a valid PIN must be supplied to create a new PINProfile.
+type RenewEnvelopeInput struct {
+	Email           string
+	Password        string
+	PIN             string // only used when SetupNewPIN is true
+	TwoFactorPrompt TwoFactorPrompt
+	SetupNewPIN     bool
+}

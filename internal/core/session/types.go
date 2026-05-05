@@ -124,3 +124,31 @@ const (
 	LoggedInLocked          AuthStatus = "logged_in_locked"
 	LoggedInUnlockAvailable AuthStatus = "logged_in_unlock_available"
 )
+
+// AuthStatusReason describes why the current AuthStatus applies.
+type AuthStatusReason string
+
+const (
+	AuthReasonNone                AuthStatusReason = "none"
+	AuthReasonKeyringUnavailable  AuthStatusReason = "keyring_unavailable"
+	AuthReasonNoToken             AuthStatusReason = "no_token"
+	AuthReasonNoPINProfile        AuthStatusReason = "no_pin_profile"
+	AuthReasonNoEnvelope          AuthStatusReason = "no_envelope"
+	AuthReasonEnvelopeExpired     AuthStatusReason = "envelope_expired"
+	AuthReasonBootChanged         AuthStatusReason = "boot_changed"
+	AuthReasonPINBackoff          AuthStatusReason = "pin_backoff"
+	AuthReasonAccountMismatch     AuthStatusReason = "account_mismatch"
+	AuthReasonEnvelopeInvalid     AuthStatusReason = "envelope_invalid"
+	AuthReasonSoftUnlockAvailable AuthStatusReason = "soft_unlock_available"
+)
+
+// AuthStatusDetail provides comprehensive authentication state for UX decisions.
+type AuthStatusDetail struct {
+	Status              AuthStatus       `json:"status"`
+	Reason              AuthStatusReason `json:"reason"`
+	HasToken            bool             `json:"hasToken"`
+	HasPINProfile       bool             `json:"hasPinProfile"`
+	HasEnvelope         bool             `json:"hasEnvelope"`
+	EnvelopeValid       bool             `json:"envelopeValid"`
+	SoftUnlockAvailable bool             `json:"softUnlockAvailable"`
+}

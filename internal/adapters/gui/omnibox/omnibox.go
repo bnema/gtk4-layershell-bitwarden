@@ -11,6 +11,7 @@ type Mode int
 const (
 	ModeUnlock Mode = iota
 	ModePINUnlock
+	ModePINRenew
 	ModeKeyringError
 	ModeSearch
 	ModeDetail
@@ -57,9 +58,9 @@ type State struct {
 	Error    string
 
 	// NeedReLogin is true when the current account is LoggedInLocked
-	// (token bundle exists but PIN envelope is missing). In this state the
-	// legacy master-password unlock path is blocked because it would not
-	// create a PIN envelope.
+	// (token bundle exists but PIN envelope is missing). Deprecated:
+	// mode-based routing (ModePINRenew / ModePINSetup) supersedes this
+	// flag. Retained for backward compatibility.
 	NeedReLogin bool
 }
 
@@ -133,6 +134,8 @@ func (s *State) Back() {
 		s.Mode = ModePINSetup
 	case ModePINSetup:
 		s.Mode = ModeUnlock
+	case ModePINRenew:
+		s.Mode = ModeUnlock
 	case ModeUnlock, ModePINUnlock, ModeKeyringError:
 		// Can't go back from unlock/keyring error; caller should ignore.
 	default:
@@ -153,6 +156,31 @@ func ModeForAuthStatus(status session.AuthStatus, hasEmail bool) Mode {
 		return ModeUnlock
 	case session.LoggedInLocked:
 		return ModeUnlock
+	default:
+		// Unauthenticated or any other status.
+		return ModeUnlock
+	}
+}
+
+// ModeForAuthStatusDetail returns the appropriate initial mode given the
+// full auth status detail and whether an email is configured. It considers
+// PIN profile and envelope presence to distinguish between renewal (profile
+// exists, only master password needed) and fresh setup (no profile, master
+// password + new PIN required).
+func ModeForAuthStatusDetail(detail session.AuthStatusDetail, hasEmail bool) Mode {
+	switch detail.Status {
+	case session.KeyringUnavailable:
+		return ModeKeyringError
+	case session.LoggedInUnlockAvailable:
+		if hasEmail {
+			return ModePINUnlock
+		}
+		return ModeUnlock
+	case session.LoggedInLocked:
+		if detail.HasPINProfile {
+			return ModePINRenew
+		}
+		return ModePINSetup
 	default:
 		// Unauthenticated or any other status.
 		return ModeUnlock

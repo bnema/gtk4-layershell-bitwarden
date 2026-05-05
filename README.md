@@ -96,18 +96,32 @@ gtk4-layershell-bitwarden logout
 ```
 
 `login` prompts for missing email, region (`us`, `eu`, or `self_hosted`),
-self-hosted server URL when needed, and master password. It authenticates with
-Bitwarden, stores the email/region/server URL in config, runs initial sync, and
-writes the encrypted cache/outbox under the XDG cache directory. `login` stores
-Bitwarden server tokens (access token, refresh token) in the Linux Secret Service
-keyring and requires a local unlock PIN. The PIN unwraps a short-lived local
-unlock envelope and is never sent to Bitwarden. Secret Service is mandatory on
-Linux; if unavailable, auth commands fail with a `keyring_unavailable` error.
+self-hosted server URL when needed, master password, and a local PIN with
+confirmation. It authenticates with Bitwarden, stores the email/region/server URL
+in config, runs initial sync, and writes the encrypted cache/outbox under the XDG
+cache directory. `login` stores Bitwarden server tokens (access token, refresh
+token), a local PIN verifier profile, and a short-lived quick-unlock envelope in
+the Linux Secret Service keyring. The profile stores an Argon2id PIN verifier and
+a random `EnvelopeKey`; it does **not** store the raw PIN. The local PIN is never
+sent to Bitwarden. Secret Service is mandatory on Linux; if unavailable, auth
+commands fail with a `keyring_unavailable` error.
 
-`unlock` uses the configured email/region and prompts for the local PIN. If the
-local unlock envelope is missing, expired, or deleted after too many failed PIN
-attempts, run `login` again with the Bitwarden master password to create a new
-PIN envelope.
+The local PIN is configured once per Bitwarden account/server. A soft lock clears
+decrypted vault state from the running process but keeps the quick-unlock
+envelope. If the envelope is still valid, reopening the overlay or running
+`unlock` asks only for the local PIN.
+
+A hard lock deletes the quick-unlock envelope but keeps the token bundle and PIN
+profile. After hard lock, reboot, Linux logout/login, envelope expiry, or too
+many failed PIN attempts, the next recovery uses the Bitwarden master password
+only to recreate quick unlock. You do not enter or choose a PIN again unless you
+are doing PIN-only soft unlock, explicitly resetting it, or logging in from a
+full logout/setup state.
+
+`unlock` uses the configured email/region and prompts for the local PIN only when
+a valid quick-unlock envelope is available. If the envelope is missing or
+invalid, use the GTK overlay renewal flow or run `login` again with the Bitwarden
+master password to recreate quick unlock.
 
 Note for headless/CI environments: Secret Service depends on a running desktop
 session with a D-Bus session bus and a keyring daemon such as GNOME Keyring or
@@ -116,11 +130,13 @@ infrastructure and will see `keyring_unavailable` errors. In those environments,
 run a compatible keyring service or use a different auth strategy outside this
 local desktop client.
 
-`lock` clears the local PIN unlock envelope from the keyring but keeps
-Bitwarden tokens intact.
+`lock` is a soft lock by default: it clears only resident process state and does
+not delete the token bundle, PIN profile, quick-unlock envelope, encrypted cache,
+or outbox. Use `lock --hard` to delete only the quick-unlock envelope while
+keeping Bitwarden tokens and the PIN profile.
 
-`logout` removes Bitwarden tokens, the local unlock envelope, the encrypted
-cache, and the encrypted outbox from disk.
+`logout` removes Bitwarden tokens, the PIN profile, the quick-unlock envelope,
+the encrypted cache, and the encrypted outbox from disk.
 
 All auth commands support:
 
@@ -132,7 +148,7 @@ All auth commands support:
 ```
 
 The app does **not** use the `BW_SESSION` environment variable. Access tokens,
-refresh tokens, PINs, and vault keys are never printed to stdout or stderr.
+refresh tokens, raw PINs, and vault keys are never printed to stdout or stderr.
 
 On Wayland, the launcher re-execs itself with `libgtk4-layer-shell.so.0` in
 `LD_PRELOAD` before GTK initializes. This matches the sekeve bootstrap and is

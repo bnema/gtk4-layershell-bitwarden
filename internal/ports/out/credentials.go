@@ -14,6 +14,10 @@ type CredentialStore interface {
 	SaveUnlockEnvelope(ctx context.Context, ref session.AccountRef, envelope session.UnlockEnvelope) error
 	LoadUnlockEnvelope(ctx context.Context, ref session.AccountRef) (session.UnlockEnvelope, error)
 	DeleteUnlockEnvelope(ctx context.Context, ref session.AccountRef) error
+
+	SavePINProfile(ctx context.Context, ref session.AccountRef, profile session.PINProfile) error
+	LoadPINProfile(ctx context.Context, ref session.AccountRef) (session.PINProfile, error)
+	DeletePINProfile(ctx context.Context, ref session.AccountRef) error
 }
 
 type BootIDProvider interface {

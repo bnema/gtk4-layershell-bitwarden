@@ -41,11 +41,11 @@ type Event struct {
 // application through this interface.
 type AppService interface {
 	Login(ctx context.Context, input auth.LoginInput) error
-	Unlock(ctx context.Context, email, password string) error
-	UnlockWithTwoFactor(ctx context.Context, email, password string, prompt auth.TwoFactorPrompt) error
 	UnlockWithPIN(ctx context.Context, email, pin string) error
-	UnlockAndCreateEnvelope(ctx context.Context, email, password, pin string, prompt auth.TwoFactorPrompt) error
+	RenewUnlockEnvelope(ctx context.Context, input auth.RenewEnvelopeInput) error
 	Lock(ctx context.Context) error
+	SoftLock(ctx context.Context) error
+	HardLock(ctx context.Context, email string) error
 	Search(ctx context.Context, query string, limit int) ([]vault.ScoredItem, error)
 	Items(ctx context.Context) ([]vault.Item, error)
 	Get(ctx context.Context, id string) (vault.Item, error)
@@ -64,4 +64,5 @@ type AppService interface {
 	Events() <-chan Event
 	Shutdown(ctx context.Context) error
 	AuthStatus(ctx context.Context, email string) (session.AuthStatus, error)
+	AuthStatusDetail(ctx context.Context, email string) (session.AuthStatusDetail, error)
 }

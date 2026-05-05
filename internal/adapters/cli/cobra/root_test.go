@@ -320,8 +320,10 @@ type fakeCredentialStore struct {
 	checkAvailableErr   error
 	delTokenCalls       int
 	delEnvelopeCalls    int
+	delPINProfileCalls  int
 	delEnvelopeErr      error
 	delTokenErr         error
+	delPINProfileErr    error
 }
 
 func (f *fakeCredentialStore) CheckAvailable(context.Context) error {
@@ -349,12 +351,22 @@ func (f *fakeCredentialStore) DeleteUnlockEnvelope(context.Context, session.Acco
 	f.delEnvelopeCalls++
 	return f.delEnvelopeErr
 }
+func (f *fakeCredentialStore) SavePINProfile(context.Context, session.AccountRef, session.PINProfile) error {
+	return nil
+}
+func (f *fakeCredentialStore) LoadPINProfile(context.Context, session.AccountRef) (session.PINProfile, error) {
+	return session.PINProfile{}, nil
+}
+func (f *fakeCredentialStore) DeletePINProfile(context.Context, session.AccountRef) error {
+	f.delPINProfileCalls++
+	return f.delPINProfileErr
+}
 
 // ---------------------------------------------------------------------------
 // Lock tests
 // ---------------------------------------------------------------------------
 
-func TestLockDeletesUnlockEnvelopeOnly(t *testing.T) {
+func TestLockDefaultSoftDoesNotDeleteEnvelope(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.toml")
 
@@ -375,13 +387,45 @@ func TestLockDeletesUnlockEnvelopeOnly(t *testing.T) {
 	require.NoError(t, err)
 
 	output := buf.String()
-	assert.Contains(t, output, "Local unlock cleared.")
+	assert.Contains(t, output, "soft lock")
 	assert.NotContains(t, output, "BW_SESSION", "output must not contain BW_SESSION")
 
-	// Unlock envelope should be deleted, token bundle must NOT be touched.
+	// Default lock (soft) should NOT touch the keyring at all.
+	assert.Equal(t, 0, fakeStore.checkAvailableCalls, "soft lock should not touch keyring")
+	assert.Equal(t, 0, fakeStore.delEnvelopeCalls, "soft lock must not delete envelope")
+	assert.Equal(t, 0, fakeStore.delTokenCalls, "soft lock must not delete token")
+	assert.Equal(t, 0, fakeStore.delPINProfileCalls, "soft lock must not delete PIN profile")
+}
+
+func TestLockHardDeletesUnlockEnvelopeOnly(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.toml")
+
+	// Pre-configure email.
+	opts := Options{ConfigPath: configPath}
+	_, err := executeCmd(t, opts, []string{"config", "set", "bitwarden.email", "test@example.com"})
+	require.NoError(t, err)
+
+	fakeStore := &fakeCredentialStore{}
+	opts.CredentialStore = fakeStore
+
+	cmd := newLockCmd(opts)
+	cmd.SetArgs([]string{"--hard"})
+	buf := new(bytes.Buffer)
+	cmd.SetOut(buf)
+
+	err = cmd.Execute()
+	require.NoError(t, err)
+
+	output := buf.String()
+	assert.Contains(t, output, "Local unlock envelope cleared.")
+	assert.NotContains(t, output, "BW_SESSION", "output must not contain BW_SESSION")
+
+	// Unlock envelope should be deleted, token bundle and PIN profile must NOT be touched.
 	assert.Equal(t, 1, fakeStore.checkAvailableCalls, "CheckAvailable should be called once")
 	assert.Equal(t, 1, fakeStore.delEnvelopeCalls, "DeleteUnlockEnvelope should be called once")
 	assert.Equal(t, 0, fakeStore.delTokenCalls, "DeleteTokenBundle must NOT be called")
+	assert.Equal(t, 0, fakeStore.delPINProfileCalls, "DeletePINProfile must NOT be called")
 }
 
 func TestLockNoEmailPrintsAlreadyLocked(t *testing.T) {
@@ -423,7 +467,7 @@ func TestLockFailsOnCheckAvailableError(t *testing.T) {
 	opts.CredentialStore = fakeStore
 
 	cmd := newLockCmd(opts)
-	cmd.SetArgs([]string{})
+	cmd.SetArgs([]string{"--hard"})
 	buf := new(bytes.Buffer)
 	cmd.SetOut(buf)
 
@@ -468,10 +512,11 @@ func TestLogoutDeletesCredentialsAndCacheOutbox(t *testing.T) {
 	output := buf.String()
 	assert.Contains(t, output, "logged out")
 
-	// Both unlock envelope and token bundle should be deleted.
+	// Unlock envelope, token bundle, and PIN profile should be deleted.
 	assert.Equal(t, 1, fakeStore.checkAvailableCalls, "CheckAvailable should be called once")
 	assert.Equal(t, 1, fakeStore.delEnvelopeCalls, "DeleteUnlockEnvelope should be called once")
 	assert.Equal(t, 1, fakeStore.delTokenCalls, "DeleteTokenBundle should be called once")
+	assert.Equal(t, 1, fakeStore.delPINProfileCalls, "DeletePINProfile should be called once")
 
 	// Cache and outbox files should be removed.
 	assert.NoFileExists(t, cachePath, "cache file should be removed")

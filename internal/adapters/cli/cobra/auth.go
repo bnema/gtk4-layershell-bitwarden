@@ -31,10 +31,15 @@ type authOptions struct {
 }
 
 type statusResponse struct {
-	ServerURL string `json:"serverUrl,omitempty"`
-	LastSync  string `json:"lastSync,omitempty"`
-	UserEmail string `json:"userEmail,omitempty"`
-	Status    string `json:"status"`
+	ServerURL           string `json:"serverUrl,omitempty"`
+	LastSync            string `json:"lastSync,omitempty"`
+	UserEmail           string `json:"userEmail,omitempty"`
+	Status              string `json:"status"`
+	Reason              string `json:"reason"`
+	HasPinProfile       bool   `json:"hasPinProfile"`
+	HasEnvelope         bool   `json:"hasEnvelope"`
+	EnvelopeValid       bool   `json:"envelopeValid"`
+	SoftUnlockAvailable bool   `json:"softUnlockAvailable"`
 }
 
 func newLoginCmd(opts Options, cachePath, outboxPath string) *cobra.Command {
@@ -191,24 +196,19 @@ func runUnlock(cmd *cobra.Command, opts Options, cachePath, outboxPath string, a
 	}
 	defer func() { _ = svc.Shutdown(context.Background()) }()
 
-	status, statusErr := svc.AuthStatus(cmd.Context(), email)
-	if statusErr != nil {
-		return fmt.Errorf("auth status: %w", statusErr)
+	detail, detailErr := svc.AuthStatusDetail(cmd.Context(), email)
+	if detailErr != nil {
+		if detail.Status != session.KeyringUnavailable {
+			return fmt.Errorf("auth status: %w", detailErr)
+		}
+		return fmt.Errorf("secret service is required for unlock")
 	}
 
 	// Fail-fast for any state where PIN unlock cannot succeed, before
 	// consuming stdin.
-	switch status {
-	case session.KeyringUnavailable:
-		return fmt.Errorf("secret service is required for unlock")
-	case session.Unauthenticated:
-		return fmt.Errorf("not logged in; run `gtk4-layershell-bitwarden login <email>` first")
-	case session.LoggedInLocked:
-		return fmt.Errorf("no local unlock envelope; run `gtk4-layershell-bitwarden login <email>` to create a PIN envelope")
-	case session.LoggedInUnlockAvailable:
-		// Only proceed to read PIN when unlock is possible.
-	default:
-		return fmt.Errorf("unknown auth status %q", status)
+	if !detail.SoftUnlockAvailable {
+		msg := detailLockedMessage(detail)
+		return fmt.Errorf("%s", msg)
 	}
 
 	// Resolve PIN from args, env, file, or prompt (not master password).
@@ -230,6 +230,34 @@ func runUnlock(cmd *cobra.Command, opts Options, cachePath, outboxPath string, a
 		cmd.Println("Your vault is now unlocked!")
 	}
 	return nil
+}
+
+// detailLockedMessage returns a user-facing message explaining why PIN unlock
+// is not available, based on the AuthStatusDetail. The message directs the user
+// to the appropriate recovery path (login, renew via GUI, wait, etc.).
+func detailLockedMessage(detail session.AuthStatusDetail) string {
+	switch detail.Reason {
+	case session.AuthReasonNoToken:
+		return "not logged in; run `gtk4-layershell-bitwarden login <email>` first"
+	case session.AuthReasonNoPINProfile:
+		return "no PIN profile configured; run `gtk4-layershell-bitwarden login <email>` to set up PIN unlock"
+	case session.AuthReasonNoEnvelope:
+		return "no unlock envelope; run `gtk4-layershell-bitwarden login <email>` to create one, or use the GUI for envelope renewal"
+	case session.AuthReasonEnvelopeExpired:
+		return "unlock envelope expired; renew with master password (run GUI or login)"
+	case session.AuthReasonBootChanged:
+		return "system boot changed; renew unlock with master password (run GUI or login)"
+	case session.AuthReasonPINBackoff:
+		return "too many PIN attempts; wait and retry"
+	case session.AuthReasonAccountMismatch:
+		return "account mismatch in envelope; renew unlock with master password (run GUI or login)"
+	case session.AuthReasonEnvelopeInvalid:
+		return "unlock envelope invalid; renew with master password (run GUI or login)"
+	case session.AuthReasonKeyringUnavailable:
+		return "secret service is required for unlock"
+	default:
+		return fmt.Sprintf("soft unlock not available (reason: %s, status: %s)", detail.Reason, detail.Status)
+	}
 }
 
 func promptTwoFactorCode(cmd *cobra.Command) coreauth.TwoFactorPrompt {
@@ -466,7 +494,7 @@ func newStatusCmd(opts Options, cachePath, outboxPath string) *cobra.Command {
 				Status:    string(session.Unauthenticated),
 			}
 
-			// Retrieve AuthStatus from the composed service when an email is configured.
+			// Retrieve AuthStatusDetail from the composed service when an email is configured.
 			if email != "" {
 				svc, serr := composeAppService(opts, cmd.Context(), cfg, cachePath, outboxPath)
 				if serr != nil {
@@ -474,13 +502,18 @@ func newStatusCmd(opts Options, cachePath, outboxPath string) *cobra.Command {
 				}
 				defer func() { _ = svc.Shutdown(context.Background()) }()
 
-				statusStr, aerr := svc.AuthStatus(cmd.Context(), email)
-				if aerr != nil {
-					if statusStr != session.KeyringUnavailable {
-						return aerr
+				detail, derr := svc.AuthStatusDetail(cmd.Context(), email)
+				if derr != nil {
+					if detail.Status != session.KeyringUnavailable {
+						return derr
 					}
 				}
-				resp.Status = string(statusStr)
+				resp.Status = string(detail.Status)
+				resp.Reason = string(detail.Reason)
+				resp.HasPinProfile = detail.HasPINProfile
+				resp.HasEnvelope = detail.HasEnvelope
+				resp.EnvelopeValid = detail.EnvelopeValid
+				resp.SoftUnlockAvailable = detail.SoftUnlockAvailable
 			}
 
 			// LastSync derived from cache file mtime.
@@ -508,13 +541,15 @@ func effectiveServerURL(cfg *coreconfig.Config) string {
 	return "https://vault.bitwarden.com"
 }
 
-// newLockCmd deletes the local unlock envelope from the OS keyring so that
-// a PIN is required to unlock again. The Bitwarden token bundle, encrypted
-// cache, and outbox are left intact.
+// newLockCmd locks the local vault. By default it performs a soft lock
+// (clears resident process state only). With --hard, it also deletes the
+// unlock envelope from the OS keyring.
 func newLockCmd(opts Options) *cobra.Command {
-	return &cobra.Command{
+	var hard bool
+	cmd := &cobra.Command{
 		Use:   "lock",
-		Short: "Lock the local vault (clears unlock envelope)",
+		Short: "Lock the local vault",
+		Long:  "Lock the local vault. By default a soft lock is performed (clear process state only). Use --hard to also delete the unlock envelope.",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			mgr := viperadapter.NewManager(opts.ConfigPath)
@@ -530,12 +565,22 @@ func newLockCmd(opts Options) *cobra.Command {
 			}
 
 			store := credentialStore(opts)
-			if err := deleteUnlockEnvelopeForConfig(cmd.Context(), store, cfg); err != nil {
-				return fmt.Errorf("lock: %w", err)
+
+			if hard {
+				// Hard lock: delete unlock envelope only (token + profile preserved).
+				if err := deleteUnlockEnvelopeForConfig(cmd.Context(), store, cfg); err != nil {
+					return fmt.Errorf("lock: %w", err)
+				}
+				cmd.Println("Local unlock envelope cleared.")
+			} else {
+				// Soft lock (default): local process state cleared. For a CLI process
+				// there is no resident state to clear, so this is informational.
+				cmd.Println("Local vault locked (soft lock).")
 			}
 
-			cmd.Println("Local unlock cleared.")
 			return nil
 		},
 	}
+	cmd.Flags().BoolVar(&hard, "hard", false, "Perform a hard lock (delete unlock envelope)")
+	return cmd
 }

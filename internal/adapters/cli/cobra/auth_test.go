@@ -24,15 +24,17 @@ import (
 // TODO: Replace fakeAuthService with a generated mock if this app repo adopts
 // mockery configuration for inbound ports.
 type fakeAuthService struct {
-	email            string
-	password         string
-	pin              string
-	requireTwoFactor bool
-	twoFactorCode    string
-	events           chan in.Event
-	authStatus       session.AuthStatus
-	authStatusErr    error
-	loginErr         error
+	email               string
+	password            string
+	pin                 string
+	requireTwoFactor    bool
+	twoFactorCode       string
+	events              chan in.Event
+	authStatus          session.AuthStatus
+	authStatusErr       error
+	authStatusDetail    session.AuthStatusDetail
+	authStatusDetailErr error
+	loginErr            error
 }
 
 func newFakeAuthService() *fakeAuthService {
@@ -78,7 +80,12 @@ func (f *fakeAuthService) UnlockWithPIN(_ context.Context, email, pin string) er
 func (f *fakeAuthService) UnlockAndCreateEnvelope(ctx context.Context, email, password, pin string, prompt coreauth.TwoFactorPrompt) error {
 	return f.UnlockWithPIN(ctx, email, pin)
 }
-func (f *fakeAuthService) Lock(context.Context) error { return nil }
+func (f *fakeAuthService) RenewUnlockEnvelope(_ context.Context, _ coreauth.RenewEnvelopeInput) error {
+	return nil
+}
+func (f *fakeAuthService) Lock(context.Context) error                 { return nil }
+func (f *fakeAuthService) SoftLock(context.Context) error             { return nil }
+func (f *fakeAuthService) HardLock(_ context.Context, _ string) error { return nil }
 func (f *fakeAuthService) Search(context.Context, string, int) ([]vault.ScoredItem, error) {
 	return nil, nil
 }
@@ -117,6 +124,9 @@ func (f *fakeAuthService) Shutdown(context.Context) error {
 }
 func (f *fakeAuthService) AuthStatus(_ context.Context, _ string) (session.AuthStatus, error) {
 	return f.authStatus, f.authStatusErr
+}
+func (f *fakeAuthService) AuthStatusDetail(_ context.Context, _ string) (session.AuthStatusDetail, error) {
+	return f.authStatusDetail, f.authStatusDetailErr
 }
 
 func TestLoginDoesNotPrintBWSessionAndRequiresPIN(t *testing.T) {
@@ -235,7 +245,15 @@ func TestUnlockUsesConfiguredEmailAndPIN(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.toml")
 	fake := newFakeAuthService()
-	fake.authStatus = session.LoggedInUnlockAvailable
+	fake.authStatusDetail = session.AuthStatusDetail{
+		Status:              session.LoggedInUnlockAvailable,
+		Reason:              session.AuthReasonSoftUnlockAvailable,
+		HasToken:            true,
+		HasPINProfile:       true,
+		HasEnvelope:         true,
+		EnvelopeValid:       true,
+		SoftUnlockAvailable: true,
+	}
 	opts := Options{
 		ConfigPath: configPath,
 		ComposeService: func(context.Context, *coreconfig.Config, string, string) (in.AppService, error) {
@@ -267,7 +285,15 @@ func TestUnlockPromptsPINFromStdin(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.toml")
 	fake := newFakeAuthService()
-	fake.authStatus = session.LoggedInUnlockAvailable
+	fake.authStatusDetail = session.AuthStatusDetail{
+		Status:              session.LoggedInUnlockAvailable,
+		Reason:              session.AuthReasonSoftUnlockAvailable,
+		HasToken:            true,
+		HasPINProfile:       true,
+		HasEnvelope:         true,
+		EnvelopeValid:       true,
+		SoftUnlockAvailable: true,
+	}
 	opts := Options{
 		ConfigPath: configPath,
 		ComposeService: func(context.Context, *coreconfig.Config, string, string) (in.AppService, error) {
@@ -298,7 +324,13 @@ func TestStatusReportsLockedWhenEmailConfigured(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.toml")
 	fake := newFakeAuthService()
-	fake.authStatus = session.LoggedInLocked
+	fake.authStatusDetail = session.AuthStatusDetail{
+		Status:        session.LoggedInLocked,
+		Reason:        session.AuthReasonNoEnvelope,
+		HasToken:      true,
+		HasPINProfile: true,
+		HasEnvelope:   false,
+	}
 	opts := Options{
 		ConfigPath: configPath,
 		ComposeService: func(context.Context, *coreconfig.Config, string, string) (in.AppService, error) {
@@ -322,7 +354,15 @@ func TestStatusReportsAuthStatusFromService(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.toml")
 	fake := newFakeAuthService()
-	fake.authStatus = session.LoggedInUnlockAvailable
+	fake.authStatusDetail = session.AuthStatusDetail{
+		Status:              session.LoggedInUnlockAvailable,
+		Reason:              session.AuthReasonSoftUnlockAvailable,
+		HasToken:            true,
+		HasPINProfile:       true,
+		HasEnvelope:         true,
+		EnvelopeValid:       true,
+		SoftUnlockAvailable: true,
+	}
 	opts := Options{
 		ConfigPath: configPath,
 		ComposeService: func(context.Context, *coreconfig.Config, string, string) (in.AppService, error) {
@@ -346,8 +386,11 @@ func TestStatusReportsKeyringUnavailable(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.toml")
 	fake := newFakeAuthService()
-	fake.authStatus = session.KeyringUnavailable
-	fake.authStatusErr = errors.New("keyring unavailable")
+	fake.authStatusDetail = session.AuthStatusDetail{
+		Status: session.KeyringUnavailable,
+		Reason: session.AuthReasonKeyringUnavailable,
+	}
+	fake.authStatusDetailErr = errors.New("keyring unavailable")
 	opts := Options{
 		ConfigPath: configPath,
 		ComposeService: func(context.Context, *coreconfig.Config, string, string) (in.AppService, error) {
@@ -374,6 +417,15 @@ func TestLoginFailsOnKeyringUnavailable(t *testing.T) {
 		events:     make(chan in.Event, 4),
 		authStatus: session.KeyringUnavailable,
 		authStatusErr: &cerrors.Error{
+			Kind:    cerrors.KindValidation,
+			Op:      "credentials.CheckAvailable",
+			Message: "secret service not available",
+		},
+		authStatusDetail: session.AuthStatusDetail{
+			Status: session.KeyringUnavailable,
+			Reason: session.AuthReasonKeyringUnavailable,
+		},
+		authStatusDetailErr: &cerrors.Error{
 			Kind:    cerrors.KindValidation,
 			Op:      "credentials.CheckAvailable",
 			Message: "secret service not available",
@@ -429,9 +481,12 @@ func TestUnlockDoesNotConsumePINStdinWhenKeyringUnavailable(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.toml")
 	fake := &fakeAuthService{
-		events:     make(chan in.Event, 4),
-		authStatus: session.KeyringUnavailable,
-		authStatusErr: &cerrors.Error{
+		events: make(chan in.Event, 4),
+		authStatusDetail: session.AuthStatusDetail{
+			Status: session.KeyringUnavailable,
+			Reason: session.AuthReasonKeyringUnavailable,
+		},
+		authStatusDetailErr: &cerrors.Error{
 			Kind:    cerrors.KindValidation,
 			Op:      "credentials.CheckAvailable",
 			Message: "secret service not available",
@@ -460,7 +515,7 @@ func TestUnlockDoesNotConsumePINStdinWhenKeyringUnavailable(t *testing.T) {
 
 	err = root.ExecuteContext(context.Background())
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "secret service not available")
+	require.Contains(t, err.Error(), "secret service is required for unlock")
 
 	// Verify PIN was NOT consumed (should not have been passed to UnlockWithPIN).
 	require.Empty(t, fake.pin, "PIN should not be consumed when keyring is unavailable")
@@ -471,7 +526,11 @@ func TestUnlockDoesNotConsumePINStdinWhenKeyringUnavailable(t *testing.T) {
 func TestUnlockDoesNotConsumePINWhenUnauthenticated(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.toml")
-	fake := newFakeAuthService() // authStatus defaults to Unauthenticated
+	fake := newFakeAuthService()
+	fake.authStatusDetail = session.AuthStatusDetail{
+		Status: session.Unauthenticated,
+		Reason: session.AuthReasonNoToken,
+	}
 	opts := Options{
 		ConfigPath: configPath,
 		ComposeService: func(context.Context, *coreconfig.Config, string, string) (in.AppService, error) {
@@ -505,7 +564,13 @@ func TestUnlockDoesNotConsumePINWhenLoggedInLocked(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.toml")
 	fake := newFakeAuthService()
-	fake.authStatus = session.LoggedInLocked
+	fake.authStatusDetail = session.AuthStatusDetail{
+		Status:        session.LoggedInLocked,
+		Reason:        session.AuthReasonNoEnvelope,
+		HasToken:      true,
+		HasPINProfile: true,
+		HasEnvelope:   false,
+	}
 	opts := Options{
 		ConfigPath: configPath,
 		ComposeService: func(context.Context, *coreconfig.Config, string, string) (in.AppService, error) {
@@ -527,10 +592,226 @@ func TestUnlockDoesNotConsumePINWhenLoggedInLocked(t *testing.T) {
 
 	err = root.ExecuteContext(context.Background())
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "no local unlock envelope")
+	require.Contains(t, err.Error(), "no unlock envelope")
 
 	// Verify PIN was NOT consumed.
 	require.Empty(t, fake.pin, "PIN should not be consumed when logged-in-locked")
+}
+
+// TestUnlockFailsWhenEnvelopeExpired verifies that unlock fails fast
+// with guidance when the envelope is expired.
+func TestUnlockFailsWhenEnvelopeExpired(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.toml")
+	fake := newFakeAuthService()
+	fake.authStatusDetail = session.AuthStatusDetail{
+		Status:        session.LoggedInLocked,
+		Reason:        session.AuthReasonEnvelopeExpired,
+		HasToken:      true,
+		HasPINProfile: true,
+		HasEnvelope:   true,
+		EnvelopeValid: false,
+	}
+	opts := Options{
+		ConfigPath: configPath,
+		ComposeService: func(context.Context, *coreconfig.Config, string, string) (in.AppService, error) {
+			return fake, nil
+		},
+	}
+
+	_, err := executeCmd(t, opts, []string{"config", "set", "bitwarden.email", "me@example.com"})
+	require.NoError(t, err)
+
+	// Provide PIN via stdin — it should NOT be consumed.
+	stdin := strings.NewReader("9999\n")
+	root := NewRootCommand(opts)
+	root.SetArgs([]string{"unlock", "--raw", "--no-sync"})
+	root.SetIn(stdin)
+	out := new(bytes.Buffer)
+	root.SetOut(out)
+	root.SetErr(new(bytes.Buffer))
+
+	err = root.ExecuteContext(context.Background())
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "envelope expired")
+
+	// Verify PIN was NOT consumed.
+	require.Empty(t, fake.pin, "PIN should not be consumed when envelope is expired")
+}
+
+// TestUnlockFailsWhenBootChanged verifies that unlock fails fast
+// with guidance when the system boot ID changed.
+func TestUnlockFailsWhenBootChanged(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.toml")
+	fake := newFakeAuthService()
+	fake.authStatusDetail = session.AuthStatusDetail{
+		Status:        session.LoggedInLocked,
+		Reason:        session.AuthReasonBootChanged,
+		HasToken:      true,
+		HasPINProfile: true,
+		HasEnvelope:   true,
+		EnvelopeValid: false,
+	}
+	opts := Options{
+		ConfigPath: configPath,
+		ComposeService: func(context.Context, *coreconfig.Config, string, string) (in.AppService, error) {
+			return fake, nil
+		},
+	}
+
+	_, err := executeCmd(t, opts, []string{"config", "set", "bitwarden.email", "me@example.com"})
+	require.NoError(t, err)
+
+	stdin := strings.NewReader("9999\n")
+	root := NewRootCommand(opts)
+	root.SetArgs([]string{"unlock", "--raw", "--no-sync"})
+	root.SetIn(stdin)
+	out := new(bytes.Buffer)
+	root.SetOut(out)
+	root.SetErr(new(bytes.Buffer))
+
+	err = root.ExecuteContext(context.Background())
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "boot changed")
+
+	// Verify PIN was NOT consumed.
+	require.Empty(t, fake.pin, "PIN should not be consumed when boot changed")
+}
+
+// TestStatusReportsDetailFields verifies that status exposes
+// reason, hasPinProfile, hasEnvelope, envelopeValid, and softUnlockAvailable.
+func TestStatusReportsDetailFields(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.toml")
+	fake := newFakeAuthService()
+	fake.authStatusDetail = session.AuthStatusDetail{
+		Status:              session.LoggedInUnlockAvailable,
+		Reason:              session.AuthReasonSoftUnlockAvailable,
+		HasToken:            true,
+		HasPINProfile:       true,
+		HasEnvelope:         true,
+		EnvelopeValid:       true,
+		SoftUnlockAvailable: true,
+	}
+	opts := Options{
+		ConfigPath: configPath,
+		ComposeService: func(context.Context, *coreconfig.Config, string, string) (in.AppService, error) {
+			return fake, nil
+		},
+	}
+
+	_, err := executeCmd(t, opts, []string{"config", "set", "bitwarden.email", "me@example.com"})
+	require.NoError(t, err)
+
+	out, err := executeCmd(t, opts, []string{"status"})
+	require.NoError(t, err)
+
+	var resp statusResponse
+	require.NoError(t, json.Unmarshal([]byte(out), &resp))
+	require.Equal(t, "me@example.com", resp.UserEmail)
+	require.Equal(t, string(session.LoggedInUnlockAvailable), resp.Status)
+	require.Equal(t, string(session.AuthReasonSoftUnlockAvailable), resp.Reason)
+	require.True(t, resp.HasPinProfile)
+	require.True(t, resp.HasEnvelope)
+	require.True(t, resp.EnvelopeValid)
+	require.True(t, resp.SoftUnlockAvailable)
+}
+
+// TestStatusReportsLockedDetail verifies that status reports correct
+// detail fields when the vault is locked with a reason.
+func TestStatusReportsLockedDetail(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.toml")
+	fake := newFakeAuthService()
+	fake.authStatusDetail = session.AuthStatusDetail{
+		Status:        session.LoggedInLocked,
+		Reason:        session.AuthReasonNoEnvelope,
+		HasToken:      true,
+		HasPINProfile: true,
+		HasEnvelope:   false,
+	}
+	opts := Options{
+		ConfigPath: configPath,
+		ComposeService: func(context.Context, *coreconfig.Config, string, string) (in.AppService, error) {
+			return fake, nil
+		},
+	}
+
+	_, err := executeCmd(t, opts, []string{"config", "set", "bitwarden.email", "me@example.com"})
+	require.NoError(t, err)
+
+	out, err := executeCmd(t, opts, []string{"status"})
+	require.NoError(t, err)
+
+	var resp statusResponse
+	require.NoError(t, json.Unmarshal([]byte(out), &resp))
+	require.Equal(t, string(session.LoggedInLocked), resp.Status)
+	require.Equal(t, string(session.AuthReasonNoEnvelope), resp.Reason)
+	require.True(t, resp.HasPinProfile, "hasPinProfile should be true")
+	require.False(t, resp.HasEnvelope, "hasEnvelope should be false")
+	require.False(t, resp.EnvelopeValid, "envelopeValid should be false")
+	require.False(t, resp.SoftUnlockAvailable, "softUnlockAvailable should be false")
+}
+
+// TestStatusNoEmailReportsDefaultDetail verifies that status without
+// a configured email reports unauthenticated with zero detail fields.
+func TestStatusNoEmailReportsDefaultDetail(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.toml")
+	opts := Options{ConfigPath: configPath}
+
+	out, err := executeCmd(t, opts, []string{"status"})
+	require.NoError(t, err)
+
+	var resp statusResponse
+	require.NoError(t, json.Unmarshal([]byte(out), &resp))
+	require.Equal(t, string(session.Unauthenticated), resp.Status)
+	require.Equal(t, "", resp.Reason)
+	require.False(t, resp.HasPinProfile)
+	require.False(t, resp.HasEnvelope)
+	require.False(t, resp.EnvelopeValid)
+	require.False(t, resp.SoftUnlockAvailable)
+}
+
+// TestUnlockFailsWhenPINBackoff verifies that unlock fails fast
+// with guidance when PIN backoff is active.
+func TestUnlockFailsWhenPINBackoff(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.toml")
+	fake := newFakeAuthService()
+	fake.authStatusDetail = session.AuthStatusDetail{
+		Status:        session.LoggedInLocked,
+		Reason:        session.AuthReasonPINBackoff,
+		HasToken:      true,
+		HasPINProfile: true,
+		HasEnvelope:   true,
+		EnvelopeValid: false,
+	}
+	opts := Options{
+		ConfigPath: configPath,
+		ComposeService: func(context.Context, *coreconfig.Config, string, string) (in.AppService, error) {
+			return fake, nil
+		},
+	}
+
+	_, err := executeCmd(t, opts, []string{"config", "set", "bitwarden.email", "me@example.com"})
+	require.NoError(t, err)
+
+	stdin := strings.NewReader("9999\n")
+	root := NewRootCommand(opts)
+	root.SetArgs([]string{"unlock", "--raw", "--no-sync"})
+	root.SetIn(stdin)
+	out := new(bytes.Buffer)
+	root.SetOut(out)
+	root.SetErr(new(bytes.Buffer))
+
+	err = root.ExecuteContext(context.Background())
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "too many PIN attempts")
+
+	// Verify PIN was NOT consumed.
+	require.Empty(t, fake.pin, "PIN should not be consumed during backoff")
 }
 
 // TestLoginRejectsMismatchedPINConfirmation verifies that interactive PIN

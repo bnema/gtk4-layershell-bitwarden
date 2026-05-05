@@ -16,11 +16,12 @@ import (
 
 // Service names and probe user for the OS keyring.
 const (
-	serviceToken  = "gtk4-layershell-bitwarden/token"
-	serviceUnlock = "gtk4-layershell-bitwarden/unlock"
-	serviceProbe  = "gtk4-layershell-bitwarden/probe"
-	probeUser     = "availability"
-	probeValue    = "ok"
+	serviceToken      = "gtk4-layershell-bitwarden/token"
+	serviceUnlock     = "gtk4-layershell-bitwarden/unlock"
+	servicePINProfile = "gtk4-layershell-bitwarden/pin-profile"
+	serviceProbe      = "gtk4-layershell-bitwarden/probe"
+	probeUser         = "availability"
+	probeValue        = "ok"
 )
 
 // errNotFound is an internal sentinel returned by backend.Get when the
@@ -277,6 +278,75 @@ func (s *Store) DeleteUnlockEnvelope(ctx context.Context, ref session.AccountRef
 
 	key := refHash(ref)
 	err := s.backend.Delete(serviceUnlock, key)
+	if errors.Is(err, errNotFound) {
+		return nil
+	}
+	return err
+}
+
+func (s *Store) SavePINProfile(ctx context.Context, ref session.AccountRef, profile session.PINProfile) error {
+	if err := checkContext(ctx); err != nil {
+		return err
+	}
+
+	norm := normalizeRef(ref)
+	clone := profile.Clone()
+	defer clone.Close()
+	if err := clone.Validate(norm); err != nil {
+		return &coreerrors.Error{
+			Kind:    coreerrors.KindValidation,
+			Message: "PIN profile does not match ref",
+			Cause:   err,
+		}
+	}
+
+	data, err := json.Marshal(clone)
+	if err != nil {
+		return err
+	}
+
+	key := refHash(norm)
+	if err := s.backend.Set(servicePINProfile, key, string(data)); err != nil {
+		return mapBackendError(err)
+	}
+	return nil
+}
+
+func (s *Store) LoadPINProfile(ctx context.Context, ref session.AccountRef) (session.PINProfile, error) {
+	if err := checkContext(ctx); err != nil {
+		return session.PINProfile{}, err
+	}
+
+	norm := normalizeRef(ref)
+	key := refHash(norm)
+	data, err := s.backend.Get(servicePINProfile, key)
+	if err != nil {
+		return session.PINProfile{}, mapBackendError(err)
+	}
+
+	var profile session.PINProfile
+	if err := json.Unmarshal([]byte(data), &profile); err != nil {
+		return session.PINProfile{}, err
+	}
+	if err := profile.Validate(norm); err != nil {
+		profile.Close()
+		return session.PINProfile{}, &coreerrors.Error{
+			Kind:    coreerrors.KindValidation,
+			Message: "loaded PIN profile does not match ref",
+			Cause:   err,
+		}
+	}
+
+	return profile, nil
+}
+
+func (s *Store) DeletePINProfile(ctx context.Context, ref session.AccountRef) error {
+	if err := checkContext(ctx); err != nil {
+		return err
+	}
+
+	key := refHash(ref)
+	err := s.backend.Delete(servicePINProfile, key)
 	if errors.Is(err, errNotFound) {
 		return nil
 	}

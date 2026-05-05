@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -150,8 +151,19 @@ func (s *Service) Login(ctx context.Context, input auth.LoginInput) (retErr erro
 		return fmt.Errorf("app: boot id: %w", err)
 	}
 
-	// 8. Create PIN-protected unlock envelope.
-	envelope, err := s.deps.PINEnvelope.Create(ctx, ref, unlockMaterial, pin, bootID)
+	// 8. Create PIN profile with verifier hash and random envelope key.
+	// The profile stores an Argon2id verifier of the human PIN (never the raw PIN)
+	// and a high-entropy EnvelopeKey used to wrap the unlock envelope.
+	profile, err := session.NewPINProfile(ref, tokens.AccountID, pin, s.now())
+	if err != nil {
+		return fmt.Errorf("app: create pin profile: %w", err)
+	}
+	defer profile.Close()
+
+	// 9. Create unlock envelope using the profile's high-entropy EnvelopeKey
+	// as the wrapping secret (not the raw human PIN).
+	envSecret := envelopeKeyToSecret(profile.EnvelopeKey)
+	envelope, err := s.deps.PINEnvelope.Create(ctx, ref, unlockMaterial, envSecret, bootID)
 	if err != nil {
 		return fmt.Errorf("app: create envelope: %w", err)
 	}
@@ -161,14 +173,23 @@ func (s *Service) Login(ctx context.Context, input auth.LoginInput) (retErr erro
 		envelope.AccountID = tokens.AccountID
 	}
 
-	// 9. Persist token bundle and unlock envelope.
+	// 10. Persist token bundle, PIN profile, and unlock envelope atomically.
+	// On any persistence failure, best-effort delete all partial state.
 	if err := s.deps.Credentials.SaveTokenBundle(ctx, ref, tokens); err != nil {
 		envelope.Close()
 		return fmt.Errorf("app: save token bundle: %w", err)
 	}
-	if err := s.deps.Credentials.SaveUnlockEnvelope(ctx, ref, envelope); err != nil {
-		// Best-effort clean up token bundle on envelope save failure.
+	if err := s.deps.Credentials.SavePINProfile(ctx, ref, profile); err != nil {
 		_ = s.deps.Credentials.DeleteTokenBundle(ctx, ref)
+		_ = s.deps.Credentials.DeletePINProfile(ctx, ref)
+		_ = s.deps.Credentials.DeleteUnlockEnvelope(ctx, ref)
+		envelope.Close()
+		return fmt.Errorf("app: save pin profile: %w", err)
+	}
+	if err := s.deps.Credentials.SaveUnlockEnvelope(ctx, ref, envelope); err != nil {
+		// Best-effort clean up token bundle and PIN profile on envelope save failure.
+		_ = s.deps.Credentials.DeleteTokenBundle(ctx, ref)
+		_ = s.deps.Credentials.DeletePINProfile(ctx, ref)
 		envelope.Close()
 		return fmt.Errorf("app: save unlock envelope: %w", err)
 	}
@@ -188,11 +209,12 @@ func (s *Service) UnlockWithTwoFactor(ctx context.Context, email, password strin
 }
 
 // UnlockWithPIN unlocks the vault using a previously-stored PIN unlock envelope.
-// It loads the token bundle and unlock envelope from the credential store, opens
-// the envelope with the provided PIN, and restores the remote session. On PIN
-// mismatch, failure counters are persisted; after max failures the envelope is
-// deleted. Expired, boot-changed, and other validation errors are returned
-// without restoring the session.
+// When a PINProfile exists, the human PIN is verified against the profile's
+// Argon2id verifier and the envelope is opened with the profile's high-entropy
+// EnvelopeKey. When the profile is missing (legacy/migration path), the envelope
+// is opened with the human PIN and a new PINProfile is created and saved after
+// success. On PIN mismatch, failure counters are persisted; after max failures
+// the envelope is deleted.
 func (s *Service) UnlockWithPIN(ctx context.Context, email, pin string) (retErr error) {
 	// 1. Validate dependencies.
 	if err := s.checkCredentialsAvailable(ctx); err != nil {
@@ -233,13 +255,24 @@ func (s *Service) UnlockWithPIN(ctx context.Context, email, pin string) (retErr 
 		return err
 	}
 
-	// 5. Load unlock envelope.
-	envelope, err := s.deps.Credentials.LoadUnlockEnvelope(ctx, ref)
-	if err != nil {
+	// 5. Load PIN profile.
+	pin = strings.TrimSpace(pin)
+	profile, profileErr := s.deps.Credentials.LoadPINProfile(ctx, ref)
+	profileExists := profileErr == nil
+	if profileExists {
+		defer profile.Close()
+		if err := profile.Validate(ref); err != nil {
+			s.mu.Lock()
+			s.state = auth.LockStateLocked
+			s.mu.Unlock()
+			return fmt.Errorf("app: unlock-pin: validate pin profile: %w", err)
+		}
+	}
+	if profileErr != nil && !errors.Is(profileErr, cerrors.ErrNotFound) {
 		s.mu.Lock()
 		s.state = auth.LockStateLocked
 		s.mu.Unlock()
-		return fmt.Errorf("app: unlock-pin: load envelope: %w", err)
+		return fmt.Errorf("app: unlock-pin: load pin profile: %w", profileErr)
 	}
 
 	// 6. Get boot ID.
@@ -251,8 +284,80 @@ func (s *Service) UnlockWithPIN(ctx context.Context, email, pin string) (retErr 
 		return fmt.Errorf("app: unlock-pin: boot id: %w", err)
 	}
 
-	// 7. Open the PIN envelope.
-	material, opened, openErr := s.deps.PINEnvelope.Open(ctx, ref, envelope, pin, bootID)
+	// 7. Load unlock envelope.
+	envelope, err := s.deps.Credentials.LoadUnlockEnvelope(ctx, ref)
+	if err != nil {
+		s.mu.Lock()
+		s.state = auth.LockStateLocked
+		s.mu.Unlock()
+		return fmt.Errorf("app: unlock-pin: load envelope: %w", err)
+	}
+
+	var material session.UnlockMaterial
+	var opened session.UnlockEnvelope
+	var openErr error
+
+	if profileExists {
+		// 7a. Profile exists: verify human PIN against profile first.
+		if !profile.VerifyPIN(pin) {
+			// PIN wrong: call Open with human PIN to increment failure counters.
+			material, opened, openErr = s.deps.PINEnvelope.Open(ctx, ref, envelope, pin, bootID)
+		} else {
+			// PIN correct: open envelope using the high-entropy EnvelopeKey,
+			// not the raw human PIN.
+			envSecret := envelopeKeyToSecret(profile.EnvelopeKey)
+			material, opened, openErr = s.deps.PINEnvelope.Open(ctx, ref, envelope, envSecret, bootID)
+		}
+	} else {
+		// 7b. Migration path: no profile, open envelope with raw human PIN.
+		material, opened, openErr = s.deps.PINEnvelope.Open(ctx, ref, envelope, pin, bootID)
+		if openErr == nil {
+			// Success: create and save a PINProfile from this PIN, then
+			// rewrap the legacy raw-PIN envelope with the profile EnvelopeKey
+			// before marking unlocked. Without this replacement, the next
+			// profile-backed PIN unlock would try to open a raw-PIN envelope
+			// with the EnvelopeKey and fail.
+			newProfile, perr := session.NewPINProfile(ref, tokens.AccountID, pin, s.now())
+			if perr != nil {
+				material.Close()
+				s.mu.Lock()
+				s.state = auth.LockStateLocked
+				s.mu.Unlock()
+				return fmt.Errorf("app: unlock-pin: create migration profile: %w", perr)
+			}
+			defer newProfile.Close()
+			if saveErr := s.deps.Credentials.SavePINProfile(ctx, ref, newProfile); saveErr != nil {
+				material.Close()
+				s.mu.Lock()
+				s.state = auth.LockStateLocked
+				s.mu.Unlock()
+				return fmt.Errorf("app: unlock-pin: save migration profile: %w", saveErr)
+			}
+
+			rewrapped, createErr := s.deps.PINEnvelope.Create(ctx, ref, material, envelopeKeyToSecret(newProfile.EnvelopeKey), bootID)
+			if createErr != nil {
+				_ = s.deps.Credentials.DeletePINProfile(ctx, ref)
+				material.Close()
+				s.mu.Lock()
+				s.state = auth.LockStateLocked
+				s.mu.Unlock()
+				return fmt.Errorf("app: unlock-pin: create migration envelope: %w", createErr)
+			}
+			if tokens.AccountID != "" {
+				rewrapped.AccountID = tokens.AccountID
+			}
+			if saveErr := s.deps.Credentials.SaveUnlockEnvelope(ctx, ref, rewrapped); saveErr != nil {
+				_ = s.deps.Credentials.DeletePINProfile(ctx, ref)
+				rewrapped.Close()
+				material.Close()
+				s.mu.Lock()
+				s.state = auth.LockStateLocked
+				s.mu.Unlock()
+				return fmt.Errorf("app: unlock-pin: save migration envelope: %w", saveErr)
+			}
+			opened = rewrapped
+		}
+	}
 
 	if openErr != nil {
 		// Determine if failure counters changed (PIN-related error).
@@ -283,6 +388,7 @@ func (s *Service) UnlockWithPIN(ctx context.Context, email, pin string) (retErr 
 		return openErr
 	}
 	defer material.Close()
+	defer opened.Close()
 
 	// 8. Save updated envelope if failure counters changed (reset after success).
 	if opened.FailedAttempts != envelope.FailedAttempts || opened.BackoffUntil != envelope.BackoffUntil {
@@ -323,6 +429,183 @@ func (s *Service) UnlockWithPIN(ctx context.Context, email, pin string) (retErr 
 	return nil
 }
 
+// RenewUnlockEnvelope renews the quick-unlock envelope atomically.
+// When an existing PIN profile is present, it requires only the master password
+// (PIN is ignored) and recreates the envelope using the profile's high-entropy
+// EnvelopeKey. When no profile exists, SetupNewPIN must be true and a valid
+// new PIN is required to create a profile and envelope.
+// On any persistence failure, partial credentials are cleaned up.
+func (s *Service) RenewUnlockEnvelope(ctx context.Context, input auth.RenewEnvelopeInput) (retErr error) {
+	// 1. Validate dependencies and credentials availability.
+	if err := s.checkCredentialsAvailable(ctx); err != nil {
+		return fmt.Errorf("app: renew-envelope: credentials: %w", err)
+	}
+	if s.deps.PINEnvelope == nil {
+		return fmt.Errorf("app: renew-envelope: %w", cerrors.ErrUnsupported)
+	}
+	if s.deps.BootID == nil {
+		return fmt.Errorf("app: renew-envelope: %w", cerrors.ErrUnsupported)
+	}
+	if s.deps.Remote == nil {
+		return fmt.Errorf("app: renew-envelope: %w", cerrors.ErrUnsupported)
+	}
+
+	// 2. Build account reference.
+	ref := s.accountRef(input.Email)
+
+	// 3. Load existing token bundle to verify the account is authenticated.
+	_, err := s.deps.Credentials.LoadTokenBundle(ctx, ref)
+	if err != nil {
+		return fmt.Errorf("app: renew-envelope: load token bundle: %w", err)
+	}
+
+	// 4. Load existing PIN profile.
+	profile, profileErr := s.deps.Credentials.LoadPINProfile(ctx, ref)
+	profileExists := profileErr == nil
+	if profileExists {
+		defer profile.Close()
+	}
+	if profileErr != nil && !errors.Is(profileErr, cerrors.ErrNotFound) {
+		return fmt.Errorf("app: renew-envelope: load pin profile: %w", profileErr)
+	}
+
+	var envKey []byte
+	var needsProfileSave bool
+
+	if profileExists {
+		// Existing profile: use its EnvelopeKey for the new envelope.
+		// No PIN is required.
+		envKey = make([]byte, len(profile.EnvelopeKey))
+		copy(envKey, profile.EnvelopeKey)
+		defer clear(envKey)
+	} else {
+		// No profile: must set up a new one.
+		if !input.SetupNewPIN {
+			return fmt.Errorf("app: renew-envelope: no PIN profile exists; set SetupNewPIN=true and provide a PIN")
+		}
+		pin := strings.TrimSpace(input.PIN)
+		if pin == "" {
+			return fmt.Errorf("app: renew-envelope: PIN is required when setting up a new profile")
+		}
+		if len(pin) < minPINLength {
+			return fmt.Errorf("app: renew-envelope: PIN must be at least %d characters", minPINLength)
+		}
+
+		// We'll create the profile after remote login when we know AccountID.
+		envKey = nil // created during NewPINProfile below
+	}
+
+	// 5. Perform remote master-password unlock.
+	if err := s.unlock(ctx, input.Email, input.Password, input.TwoFactorPrompt); err != nil {
+		return err
+	}
+
+	// Ensure local unlocked state/plaintext is cleared on any error after unlock.
+	defer func() {
+		if retErr != nil {
+			_ = s.Lock(context.Background())
+		}
+	}()
+
+	// 6. Export session material and token bundle.
+	material, tokens, err := s.deps.Remote.ExportSession(ctx)
+	if err != nil {
+		return fmt.Errorf("app: renew-envelope: export session: %w", err)
+	}
+	defer material.Close()
+	defer tokens.Close()
+
+	// 7. Read cache key.
+	s.mu.Lock()
+	var cacheKey []byte
+	if len(s.cacheKey) > 0 {
+		cacheKey = make([]byte, len(s.cacheKey))
+		copy(cacheKey, s.cacheKey)
+		defer clear(cacheKey)
+	}
+	s.mu.Unlock()
+
+	unlockMaterial := material.Clone()
+	defer unlockMaterial.Close()
+	if len(cacheKey) > 0 {
+		unlockMaterial.CacheKey = cacheKey
+	}
+
+	// 8. Build token bundle metadata.
+	tokens.Email = ref.Email
+	tokens.ServerURL = ref.ServerURL
+	tokens.UpdatedAt = s.now()
+
+	// 9. Create profile if needed.
+	var newProfile session.PINProfile
+	if !profileExists {
+		pin := strings.TrimSpace(input.PIN)
+		newProfile, err = session.NewPINProfile(ref, tokens.AccountID, pin, s.now())
+		if err != nil {
+			return fmt.Errorf("app: renew-envelope: create pin profile: %w", err)
+		}
+		defer newProfile.Close()
+		envKey = make([]byte, len(newProfile.EnvelopeKey))
+		copy(envKey, newProfile.EnvelopeKey)
+		defer clear(envKey)
+		needsProfileSave = true
+	}
+
+	// 10. Get boot ID.
+	bootID, err := s.deps.BootID.BootID(ctx)
+	if err != nil {
+		return fmt.Errorf("app: renew-envelope: boot id: %w", err)
+	}
+
+	// 11. Create unlock envelope using EnvelopeKey secret.
+	envSecret := envelopeKeyToSecret(envKey)
+	envelope, err := s.deps.PINEnvelope.Create(ctx, ref, unlockMaterial, envSecret, bootID)
+	if err != nil {
+		return fmt.Errorf("app: renew-envelope: create envelope: %w", err)
+	}
+	if tokens.AccountID != "" {
+		envelope.AccountID = tokens.AccountID
+	}
+
+	// 12. Persist token bundle, profile (if new), and envelope. Renewal should
+	// not delete pre-existing token/profile credentials on a partial write;
+	// hard-lock recovery must remain recoverable if envelope renewal fails.
+	if err := s.deps.Credentials.SaveTokenBundle(ctx, ref, tokens); err != nil {
+		envelope.Close()
+		return fmt.Errorf("app: renew-envelope: save token bundle: %w", err)
+	}
+	if needsProfileSave {
+		if err := s.deps.Credentials.SavePINProfile(ctx, ref, newProfile); err != nil {
+			_ = s.deps.Credentials.DeletePINProfile(ctx, ref)
+			_ = s.deps.Credentials.DeleteUnlockEnvelope(ctx, ref)
+			envelope.Close()
+			return fmt.Errorf("app: renew-envelope: save pin profile: %w", err)
+		}
+	} else if profileExists {
+		// Update profile metadata (UpdatedAt).
+		updatedProfile := profile.Clone()
+		updatedProfile.UpdatedAt = s.now()
+		if tokens.AccountID != "" {
+			updatedProfile.AccountID = tokens.AccountID
+		}
+		defer updatedProfile.Close()
+		if err := s.deps.Credentials.SavePINProfile(ctx, ref, updatedProfile); err != nil {
+			envelope.Close()
+			return fmt.Errorf("app: renew-envelope: save updated profile: %w", err)
+		}
+	}
+	if err := s.deps.Credentials.SaveUnlockEnvelope(ctx, ref, envelope); err != nil {
+		_ = s.deps.Credentials.DeleteUnlockEnvelope(ctx, ref)
+		if needsProfileSave {
+			_ = s.deps.Credentials.DeletePINProfile(ctx, ref)
+		}
+		envelope.Close()
+		return fmt.Errorf("app: renew-envelope: save unlock envelope: %w", err)
+	}
+
+	return nil
+}
+
 // UnlockAndCreateEnvelope unlocks with master password, exports session
 // material, creates a PIN envelope, and installs local state. It provides a
 // safe path for the GUI to transition from LoggedInLocked to fully enrolled
@@ -337,6 +620,9 @@ func (s *Service) UnlockAndCreateEnvelope(ctx context.Context, email, password, 
 	}
 	if s.deps.BootID == nil {
 		return fmt.Errorf("app: unlock-enroll: %w", cerrors.ErrUnsupported)
+	}
+	if err := s.checkCredentialsAvailable(ctx); err != nil {
+		return fmt.Errorf("app: unlock-enroll: credentials: %w", err)
 	}
 
 	// Validate PIN before any remote login.
@@ -388,12 +674,21 @@ func (s *Service) UnlockAndCreateEnvelope(ctx context.Context, email, password, 
 	tokens.ServerURL = ref.ServerURL
 	tokens.UpdatedAt = s.now()
 
+	// Create PIN profile with verifier hash and random envelope key.
+	profile, err := session.NewPINProfile(ref, tokens.AccountID, pin, s.now())
+	if err != nil {
+		return fmt.Errorf("app: create pin profile: %w", err)
+	}
+	defer profile.Close()
+
 	bootID, err := s.deps.BootID.BootID(ctx)
 	if err != nil {
 		return fmt.Errorf("app: boot id: %w", err)
 	}
 
-	envelope, err := s.deps.PINEnvelope.Create(ctx, ref, unlockMaterial, pin, bootID)
+	// Create envelope using the profile's high-entropy EnvelopeKey.
+	envSecret := envelopeKeyToSecret(profile.EnvelopeKey)
+	envelope, err := s.deps.PINEnvelope.Create(ctx, ref, unlockMaterial, envSecret, bootID)
 	if err != nil {
 		return fmt.Errorf("app: create envelope: %w", err)
 	}
@@ -405,8 +700,16 @@ func (s *Service) UnlockAndCreateEnvelope(ctx context.Context, email, password, 
 		envelope.Close()
 		return fmt.Errorf("app: save token bundle: %w", err)
 	}
+	if err := s.deps.Credentials.SavePINProfile(ctx, ref, profile); err != nil {
+		_ = s.deps.Credentials.DeleteTokenBundle(ctx, ref)
+		_ = s.deps.Credentials.DeletePINProfile(ctx, ref)
+		_ = s.deps.Credentials.DeleteUnlockEnvelope(ctx, ref)
+		envelope.Close()
+		return fmt.Errorf("app: save pin profile: %w", err)
+	}
 	if err := s.deps.Credentials.SaveUnlockEnvelope(ctx, ref, envelope); err != nil {
 		_ = s.deps.Credentials.DeleteTokenBundle(ctx, ref)
+		_ = s.deps.Credentials.DeletePINProfile(ctx, ref)
 		envelope.Close()
 		return fmt.Errorf("app: save unlock envelope: %w", err)
 	}
@@ -638,14 +941,12 @@ func (s *Service) loadCachedVaultWithKey(ctx context.Context, key []byte) ([]vau
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("cache decrypt: %w", err)
 	}
+	defer clear(plaintext)
 
 	var plain cache.PlainSnapshot
 	if err := json.Unmarshal(plaintext, &plain); err != nil {
 		return nil, nil, nil, fmt.Errorf("cache decode: %w", err)
 	}
-
-	// Zero plaintext bytes after decode.
-	clear(plaintext)
 
 	var items []vault.Item
 	if err := json.Unmarshal(plain.ItemsJSON, &items); err != nil {
@@ -672,8 +973,17 @@ func (s *Service) loadCachedVaultWithKey(ctx context.Context, key []byte) ([]vau
 	return items, folders, outbox, nil
 }
 
-// Lock transitions the service from unlocked to locked.
+// Lock transitions the service from unlocked to locked. It is a compatibility
+// wrapper around SoftLock.
 func (s *Service) Lock(ctx context.Context) error {
+	return s.SoftLock(ctx)
+}
+
+// SoftLock clears resident process state (items, folders, index, cache key,
+// outbox, conflicts) and cancels background workers without deleting token
+// bundle, PIN profile, unlock envelope, encrypted cache, or outbox from
+// persistent storage.
+func (s *Service) SoftLock(ctx context.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -708,6 +1018,26 @@ func (s *Service) Lock(ctx context.Context) error {
 		if err := s.deps.Remote.Lock(ctx); err != nil {
 			return fmt.Errorf("app: remote lock failed: %w", err)
 		}
+	}
+
+	return nil
+}
+
+// HardLock performs a soft lock and deletes the unlock envelope for the given
+// email. The token bundle and PIN profile are preserved, allowing the user to
+// renew the envelope with their master password via RenewUnlockEnvelope.
+func (s *Service) HardLock(ctx context.Context, email string) error {
+	if err := s.SoftLock(ctx); err != nil {
+		return err
+	}
+
+	if err := s.checkCredentialsAvailable(ctx); err != nil {
+		return fmt.Errorf("app: hard-lock: %w", err)
+	}
+
+	ref := s.accountRef(email)
+	if err := s.deps.Credentials.DeleteUnlockEnvelope(ctx, ref); err != nil {
+		return fmt.Errorf("app: hard-lock: delete envelope: %w", err)
 	}
 
 	return nil
@@ -913,6 +1243,14 @@ func (s *Service) Shutdown(ctx context.Context) error {
 // ---------------------------------------------------------------------------
 // Helper methods
 // ---------------------------------------------------------------------------
+
+// envelopeKeyToSecret converts the 32-byte high-entropy EnvelopeKey from a
+// PINProfile to an opaque hex-encoded string suitable for
+// PINEnvelopeService.Create/Open. The key is never derived from the human
+// PIN; it is a random secret stored in Secret Service.
+func envelopeKeyToSecret(key []byte) string {
+	return hex.EncodeToString(key)
+}
 
 // ensureUnlocked returns ErrLocked if the service is not in the unlocked state.
 // Caller must hold s.mu.
@@ -1139,8 +1477,20 @@ func (s *Service) ensureFreshTokens(ctx context.Context, ref session.AccountRef)
 
 // AuthStatus reports the session authentication state for the given email.
 func (s *Service) AuthStatus(ctx context.Context, email string) (session.AuthStatus, error) {
+	detail, err := s.AuthStatusDetail(ctx, email)
+	return detail.Status, err
+}
+
+// AuthStatusDetail returns detailed authentication state for the given email,
+// including the status, reason, and presence/validity of token, PIN profile,
+// and unlock envelope.
+func (s *Service) AuthStatusDetail(ctx context.Context, email string) (session.AuthStatusDetail, error) {
+	detail := session.AuthStatusDetail{}
+
 	if err := s.checkCredentialsAvailable(ctx); err != nil {
-		return session.KeyringUnavailable, err
+		detail.Status = session.KeyringUnavailable
+		detail.Reason = session.AuthReasonKeyringUnavailable
+		return detail, err
 	}
 
 	ref := s.accountRef(email)
@@ -1149,37 +1499,88 @@ func (s *Service) AuthStatus(ctx context.Context, email string) (session.AuthSta
 	_, err := s.deps.Credentials.LoadTokenBundle(ctx, ref)
 	if err != nil {
 		if errors.Is(err, cerrors.ErrNotFound) {
-			return session.Unauthenticated, nil
+			detail.Status = session.Unauthenticated
+			detail.Reason = session.AuthReasonNoToken
+			return detail, nil
 		}
-		return session.KeyringUnavailable, fmt.Errorf("app: load token bundle: %w", err)
+		detail.Status = session.KeyringUnavailable
+		detail.Reason = session.AuthReasonKeyringUnavailable
+		return detail, fmt.Errorf("app: load token bundle: %w", err)
+	}
+	detail.HasToken = true
+
+	// Load PIN profile. A missing profile does not immediately make the
+	// account locked: old envelope-only users can still PIN-unlock once and
+	// lazily create the profile after the envelope opens successfully.
+	profile, err := s.deps.Credentials.LoadPINProfile(ctx, ref)
+	profileMissing := false
+	if err != nil {
+		if errors.Is(err, cerrors.ErrNotFound) {
+			profileMissing = true
+		} else {
+			detail.Status = session.KeyringUnavailable
+			detail.Reason = session.AuthReasonKeyringUnavailable
+			return detail, fmt.Errorf("app: load pin profile: %w", err)
+		}
+	} else {
+		defer profile.Close()
+		detail.HasPINProfile = true
 	}
 
-	// Load unlock envelope; if not found the vault is locked.
+	// Load unlock envelope; if missing the vault is locked.
 	env, err := s.deps.Credentials.LoadUnlockEnvelope(ctx, ref)
 	if err != nil {
 		if errors.Is(err, cerrors.ErrNotFound) {
-			return session.LoggedInLocked, nil
+			detail.Status = session.LoggedInLocked
+			if profileMissing {
+				detail.Reason = session.AuthReasonNoPINProfile
+			} else {
+				detail.Reason = session.AuthReasonNoEnvelope
+			}
+			return detail, nil
 		}
-		return session.KeyringUnavailable, fmt.Errorf("app: load unlock envelope: %w", err)
+		detail.Status = session.KeyringUnavailable
+		detail.Reason = session.AuthReasonKeyringUnavailable
+		return detail, fmt.Errorf("app: load unlock envelope: %w", err)
 	}
+	detail.HasEnvelope = true
 
 	// BootID dependency is required to validate the envelope.
 	if s.deps.BootID == nil {
-		return session.LoggedInLocked, nil
+		detail.Status = session.LoggedInLocked
+		detail.Reason = session.AuthReasonEnvelopeInvalid
+		return detail, nil
 	}
 
 	bootID, err := s.deps.BootID.BootID(ctx)
 	if err != nil {
-		return session.LoggedInLocked, fmt.Errorf("app: boot id: %w", err)
+		detail.Status = session.LoggedInLocked
+		detail.Reason = session.AuthReasonEnvelopeInvalid
+		return detail, fmt.Errorf("app: boot id: %w", err)
 	}
 
 	if err := env.Validate(ref, bootID, s.now()); err != nil {
-		// Envelope validation failed: account mismatch, boot changed,
-		// expired, or PIN backoff.
-		return session.LoggedInLocked, nil
+		detail.Status = session.LoggedInLocked
+		switch {
+		case errors.Is(err, session.ErrBootChanged):
+			detail.Reason = session.AuthReasonBootChanged
+		case errors.Is(err, session.ErrUnlockExpired):
+			detail.Reason = session.AuthReasonEnvelopeExpired
+		case errors.Is(err, session.ErrPINBackoff):
+			detail.Reason = session.AuthReasonPINBackoff
+		case errors.Is(err, session.ErrAccountMismatch):
+			detail.Reason = session.AuthReasonAccountMismatch
+		default:
+			detail.Reason = session.AuthReasonEnvelopeInvalid
+		}
+		return detail, nil
 	}
 
-	return session.LoggedInUnlockAvailable, nil
+	detail.EnvelopeValid = true
+	detail.SoftUnlockAvailable = true
+	detail.Status = session.LoggedInUnlockAvailable
+	detail.Reason = session.AuthReasonSoftUnlockAvailable
+	return detail, nil
 }
 
 func saveEncryptedSnapshot(ctx context.Context, store interface {

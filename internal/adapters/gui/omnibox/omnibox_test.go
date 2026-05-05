@@ -165,6 +165,68 @@ func TestModeForAuthStatus_Unauthenticated(t *testing.T) {
 	require.Equal(t, ModeUnlock, mode)
 }
 
+func TestModeForAuthStatusDetail_KeyringUnavailable(t *testing.T) {
+	detail := session.AuthStatusDetail{Status: session.KeyringUnavailable}
+	mode := ModeForAuthStatusDetail(detail, true)
+	require.Equal(t, ModeKeyringError, mode)
+	mode = ModeForAuthStatusDetail(detail, false)
+	require.Equal(t, ModeKeyringError, mode)
+}
+
+func TestModeForAuthStatusDetail_LoggedInUnlockAvailable(t *testing.T) {
+	detail := session.AuthStatusDetail{
+		Status:        session.LoggedInUnlockAvailable,
+		HasEnvelope:   true,
+		EnvelopeValid: true,
+	}
+	mode := ModeForAuthStatusDetail(detail, true)
+	require.Equal(t, ModePINUnlock, mode)
+	mode = ModeForAuthStatusDetail(detail, false)
+	require.Equal(t, ModeUnlock, mode, "no email should fall back to ModeUnlock")
+}
+
+func TestModeForAuthStatusDetail_LoggedInLockedWithProfile(t *testing.T) {
+	detail := session.AuthStatusDetail{
+		Status:        session.LoggedInLocked,
+		HasPINProfile: true,
+		HasEnvelope:   false,
+		EnvelopeValid: false,
+	}
+	mode := ModeForAuthStatusDetail(detail, true)
+	require.Equal(t, ModePINRenew, mode, "profile exists but no envelope → renew")
+}
+
+func TestModeForAuthStatusDetail_LoggedInLockedNoProfile(t *testing.T) {
+	detail := session.AuthStatusDetail{
+		Status:        session.LoggedInLocked,
+		HasPINProfile: false,
+		HasEnvelope:   false,
+		EnvelopeValid: false,
+	}
+	mode := ModeForAuthStatusDetail(detail, true)
+	require.Equal(t, ModePINSetup, mode, "no profile → setup")
+}
+
+func TestModeForAuthStatusDetail_Unauthenticated(t *testing.T) {
+	detail := session.AuthStatusDetail{Status: session.Unauthenticated}
+	mode := ModeForAuthStatusDetail(detail, true)
+	require.Equal(t, ModeUnlock, mode)
+	mode = ModeForAuthStatusDetail(detail, false)
+	require.Equal(t, ModeUnlock, mode)
+}
+
+func TestModeForAuthStatusDetail_LoggedInLockedProfileExistsEnvelopeExpired(t *testing.T) {
+	detail := session.AuthStatusDetail{
+		Status:        session.LoggedInLocked,
+		Reason:        session.AuthReasonEnvelopeExpired,
+		HasPINProfile: true,
+		HasEnvelope:   true,
+		EnvelopeValid: false,
+	}
+	mode := ModeForAuthStatusDetail(detail, true)
+	require.Equal(t, ModePINRenew, mode, "profile exists, envelope expired → renew")
+}
+
 func TestBack_UnlockModesNoOp(t *testing.T) {
 	for _, mode := range []Mode{ModeUnlock, ModePINUnlock, ModeKeyringError} {
 		s := NewState()
@@ -186,4 +248,11 @@ func TestBack_PINConfirm(t *testing.T) {
 	s.Mode = ModePINConfirm
 	s.Back()
 	require.Equal(t, ModePINSetup, s.Mode, "Back from PINConfirm should go to ModePINSetup")
+}
+
+func TestBack_PINRenew(t *testing.T) {
+	s := NewState()
+	s.Mode = ModePINRenew
+	s.Back()
+	require.Equal(t, ModeUnlock, s.Mode, "Back from PINRenew should go to ModeUnlock")
 }

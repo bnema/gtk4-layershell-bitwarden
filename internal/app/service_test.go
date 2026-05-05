@@ -415,6 +415,15 @@ type fakeCredentialStore struct {
 	saveEnvelopeErr     error
 	delEnvCalls         int
 	deleteEnvelopeErr   error
+
+	pinProfile        session.PINProfile
+	savedPINProfile   session.PINProfile
+	loadPINProfileErr error
+	loadPINCalls      int
+	savePINCalls      int
+	savePINProfileErr error
+	delPINCalls       int
+	deletePINErr      error
 }
 
 func (cs *fakeCredentialStore) CheckAvailable(_ context.Context) error {
@@ -454,6 +463,10 @@ func (cs *fakeCredentialStore) SaveUnlockEnvelope(_ context.Context, _ session.A
 	defer cs.mu.Unlock()
 	cs.saveEnvCalled++
 	cs.savedUnlockEnvelope = env
+	if cs.saveEnvelopeErr == nil {
+		cs.envelope = env.Clone()
+		cs.loadEnvelopeErr = nil
+	}
 	return cs.saveEnvelopeErr
 }
 
@@ -469,6 +482,38 @@ func (cs *fakeCredentialStore) DeleteUnlockEnvelope(_ context.Context, _ session
 	defer cs.mu.Unlock()
 	cs.delEnvCalls++
 	return cs.deleteEnvelopeErr
+}
+
+func (cs *fakeCredentialStore) SavePINProfile(_ context.Context, _ session.AccountRef, profile session.PINProfile) error {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	cs.savePINCalls++
+	cs.savedPINProfile = profile.Clone()
+	if cs.savePINProfileErr == nil {
+		cs.pinProfile = profile.Clone()
+		cs.loadPINProfileErr = nil
+	}
+	return cs.savePINProfileErr
+}
+
+func (cs *fakeCredentialStore) LoadPINProfile(_ context.Context, _ session.AccountRef) (session.PINProfile, error) {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	cs.loadPINCalls++
+	if cs.loadPINProfileErr != nil {
+		return session.PINProfile{}, cs.loadPINProfileErr
+	}
+	if cs.pinProfile.Version == 0 {
+		return session.PINProfile{}, coreerrors.ErrNotFound
+	}
+	return cs.pinProfile.Clone(), nil
+}
+
+func (cs *fakeCredentialStore) DeletePINProfile(_ context.Context, _ session.AccountRef) error {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	cs.delPINCalls++
+	return cs.deletePINErr
 }
 
 // ---------------------------------------------------------------------------
@@ -1731,6 +1776,517 @@ func TestAuthStatusEffectiveServerURL(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// AuthStatusDetail tests
+// ---------------------------------------------------------------------------
+
+func TestAuthStatusDetailSoftUnlockAvailable(t *testing.T) {
+	email := "user@example.com"
+	ref := session.AccountRef{Email: email, ServerURL: "https://vault.bitwarden.com"}
+
+	profile, err := session.NewPINProfile(ref, "acct-1", "1234", time.Now())
+	require.NoError(t, err)
+
+	bundle := session.TokenBundle{
+		AccountID:    "acct-1",
+		Email:        ref.Email,
+		ServerURL:    ref.ServerURL,
+		AccessToken:  []byte("at"),
+		RefreshToken: []byte("rt"),
+		TokenType:    "Bearer",
+		ExpiresAt:    time.Now().Add(time.Hour),
+	}
+
+	envelope := session.UnlockEnvelope{
+		Version:   session.UnlockEnvelopeVersion,
+		Account:   ref,
+		AccountID: "acct-1",
+		BootID:    "boot-123",
+		ExpiresAt: time.Now().Add(time.Hour),
+	}
+
+	cs := &fakeCredentialStore{
+		tokenBundle: bundle,
+		pinProfile:  profile,
+		envelope:    envelope,
+	}
+	boot := &fakeBootID{id: "boot-123"}
+
+	svc := NewService(Deps{
+		Config:      coreconfig.Default(),
+		Credentials: cs,
+		BootID:      boot,
+	})
+
+	detail, err := svc.AuthStatusDetail(context.Background(), email)
+	require.NoError(t, err)
+	require.Equal(t, session.LoggedInUnlockAvailable, detail.Status)
+	require.Equal(t, session.AuthReasonSoftUnlockAvailable, detail.Reason)
+	require.True(t, detail.HasToken)
+	require.True(t, detail.HasPINProfile)
+	require.True(t, detail.HasEnvelope)
+	require.True(t, detail.EnvelopeValid)
+	require.True(t, detail.SoftUnlockAvailable)
+}
+
+func TestAuthStatusDetailHardRenewalRequiredNoEnvelope(t *testing.T) {
+	email := "user@example.com"
+	ref := session.AccountRef{Email: email, ServerURL: "https://vault.bitwarden.com"}
+
+	profile, err := session.NewPINProfile(ref, "acct-1", "1234", time.Now())
+	require.NoError(t, err)
+
+	bundle := session.TokenBundle{
+		AccountID:    "acct-1",
+		Email:        ref.Email,
+		ServerURL:    ref.ServerURL,
+		AccessToken:  []byte("at"),
+		RefreshToken: []byte("rt"),
+		TokenType:    "Bearer",
+		ExpiresAt:    time.Now().Add(time.Hour),
+	}
+
+	cs := &fakeCredentialStore{
+		tokenBundle:     bundle,
+		pinProfile:      profile,
+		loadEnvelopeErr: coreerrors.ErrNotFound,
+	}
+
+	svc := NewService(Deps{
+		Config:      coreconfig.Default(),
+		Credentials: cs,
+	})
+
+	detail, err := svc.AuthStatusDetail(context.Background(), email)
+	require.NoError(t, err)
+	require.Equal(t, session.LoggedInLocked, detail.Status)
+	require.Equal(t, session.AuthReasonNoEnvelope, detail.Reason)
+	require.True(t, detail.HasToken)
+	require.True(t, detail.HasPINProfile)
+	require.False(t, detail.HasEnvelope)
+	require.False(t, detail.EnvelopeValid)
+	require.False(t, detail.SoftUnlockAvailable)
+}
+
+func TestAuthStatusDetailNoPINProfileNoEnvelope(t *testing.T) {
+	email := "user@example.com"
+	ref := session.AccountRef{Email: email, ServerURL: "https://vault.bitwarden.com"}
+
+	bundle := session.TokenBundle{
+		AccountID:    "acct-1",
+		Email:        ref.Email,
+		ServerURL:    ref.ServerURL,
+		AccessToken:  []byte("at"),
+		RefreshToken: []byte("rt"),
+		TokenType:    "Bearer",
+		ExpiresAt:    time.Now().Add(time.Hour),
+	}
+
+	cs := &fakeCredentialStore{
+		tokenBundle:       bundle,
+		loadPINProfileErr: coreerrors.ErrNotFound,
+		loadEnvelopeErr:   coreerrors.ErrNotFound,
+	}
+
+	svc := NewService(Deps{
+		Config:      coreconfig.Default(),
+		Credentials: cs,
+	})
+
+	detail, err := svc.AuthStatusDetail(context.Background(), email)
+	require.NoError(t, err)
+	require.Equal(t, session.LoggedInLocked, detail.Status)
+	require.Equal(t, session.AuthReasonNoPINProfile, detail.Reason)
+	require.True(t, detail.HasToken)
+	require.False(t, detail.HasPINProfile)
+	require.False(t, detail.HasEnvelope)
+	require.False(t, detail.SoftUnlockAvailable)
+}
+
+func TestAuthStatusDetailNoPINProfileValidEnvelopeAllowsMigrationUnlock(t *testing.T) {
+	email := "user@example.com"
+	ref := session.AccountRef{Email: email, ServerURL: "https://vault.bitwarden.com"}
+
+	bundle := session.TokenBundle{
+		AccountID:    "acct-1",
+		Email:        ref.Email,
+		ServerURL:    ref.ServerURL,
+		AccessToken:  []byte("at"),
+		RefreshToken: []byte("rt"),
+		TokenType:    "Bearer",
+		ExpiresAt:    time.Now().Add(time.Hour),
+	}
+
+	envelope := session.UnlockEnvelope{
+		Version:   session.UnlockEnvelopeVersion,
+		Account:   ref,
+		AccountID: "acct-1",
+		BootID:    "boot-123",
+		ExpiresAt: time.Now().Add(time.Hour),
+	}
+
+	cs := &fakeCredentialStore{
+		tokenBundle:       bundle,
+		loadPINProfileErr: coreerrors.ErrNotFound,
+		envelope:          envelope,
+	}
+	boot := &fakeBootID{id: "boot-123"}
+
+	svc := NewService(Deps{
+		Config:      coreconfig.Default(),
+		Credentials: cs,
+		BootID:      boot,
+	})
+
+	detail, err := svc.AuthStatusDetail(context.Background(), email)
+	require.NoError(t, err)
+	require.Equal(t, session.LoggedInUnlockAvailable, detail.Status)
+	require.Equal(t, session.AuthReasonSoftUnlockAvailable, detail.Reason)
+	require.True(t, detail.HasToken)
+	require.False(t, detail.HasPINProfile)
+	require.True(t, detail.HasEnvelope)
+	require.True(t, detail.EnvelopeValid)
+	require.True(t, detail.SoftUnlockAvailable)
+}
+
+func TestAuthStatusDetailKeyringUnavailable(t *testing.T) {
+	email := "user@example.com"
+
+	cs := &fakeCredentialStore{checkAvailableErr: coreerrors.ErrUnsupported}
+
+	svc := NewService(Deps{
+		Config:      coreconfig.Default(),
+		Credentials: cs,
+	})
+
+	detail, err := svc.AuthStatusDetail(context.Background(), email)
+	require.Error(t, err)
+	require.ErrorIs(t, err, coreerrors.ErrUnsupported)
+	require.Equal(t, session.KeyringUnavailable, detail.Status)
+	require.Equal(t, session.AuthReasonKeyringUnavailable, detail.Reason)
+}
+
+func TestAuthStatusDetailNoToken(t *testing.T) {
+	email := "user@example.com"
+
+	cs := &fakeCredentialStore{loadTokenErr: coreerrors.ErrNotFound}
+
+	svc := NewService(Deps{
+		Config:      coreconfig.Default(),
+		Credentials: cs,
+	})
+
+	detail, err := svc.AuthStatusDetail(context.Background(), email)
+	require.NoError(t, err)
+	require.Equal(t, session.Unauthenticated, detail.Status)
+	require.Equal(t, session.AuthReasonNoToken, detail.Reason)
+	require.False(t, detail.HasToken)
+}
+
+func TestAuthStatusDetailTokenLoadErrorReturnsStatus(t *testing.T) {
+	email := "user@example.com"
+	cs := &fakeCredentialStore{loadTokenErr: errors.New("dbus failed")}
+
+	svc := NewService(Deps{
+		Config:      coreconfig.Default(),
+		Credentials: cs,
+	})
+
+	detail, err := svc.AuthStatusDetail(context.Background(), email)
+	require.Error(t, err)
+	require.Equal(t, session.KeyringUnavailable, detail.Status)
+	require.Equal(t, session.AuthReasonKeyringUnavailable, detail.Reason)
+}
+
+func TestAuthStatusDetailPINProfileLoadErrorReturnsStatus(t *testing.T) {
+	email := "user@example.com"
+	ref := session.AccountRef{Email: email, ServerURL: "https://vault.bitwarden.com"}
+	cs := &fakeCredentialStore{
+		tokenBundle: session.TokenBundle{
+			AccountID:    "acct-1",
+			Email:        ref.Email,
+			ServerURL:    ref.ServerURL,
+			AccessToken:  []byte("at"),
+			RefreshToken: []byte("rt"),
+		},
+		loadPINProfileErr: errors.New("dbus failed"),
+	}
+
+	svc := NewService(Deps{
+		Config:      coreconfig.Default(),
+		Credentials: cs,
+	})
+
+	detail, err := svc.AuthStatusDetail(context.Background(), email)
+	require.Error(t, err)
+	require.Equal(t, session.KeyringUnavailable, detail.Status)
+	require.Equal(t, session.AuthReasonKeyringUnavailable, detail.Reason)
+}
+
+func TestAuthStatusDetailEnvelopeExpired(t *testing.T) {
+	email := "user@example.com"
+	ref := session.AccountRef{Email: email, ServerURL: "https://vault.bitwarden.com"}
+
+	profile, err := session.NewPINProfile(ref, "acct-1", "1234", time.Now())
+	require.NoError(t, err)
+
+	bundle := session.TokenBundle{
+		AccountID:    "acct-1",
+		Email:        ref.Email,
+		ServerURL:    ref.ServerURL,
+		AccessToken:  []byte("at"),
+		RefreshToken: []byte("rt"),
+		TokenType:    "Bearer",
+		ExpiresAt:    time.Now().Add(time.Hour),
+	}
+
+	envelope := session.UnlockEnvelope{
+		Version:   session.UnlockEnvelopeVersion,
+		Account:   ref,
+		AccountID: "acct-1",
+		BootID:    "boot-123",
+		ExpiresAt: time.Now().Add(-time.Hour),
+	}
+
+	cs := &fakeCredentialStore{
+		tokenBundle: bundle,
+		pinProfile:  profile,
+		envelope:    envelope,
+	}
+	boot := &fakeBootID{id: "boot-123"}
+
+	svc := NewService(Deps{
+		Config:      coreconfig.Default(),
+		Credentials: cs,
+		BootID:      boot,
+	})
+
+	detail, err := svc.AuthStatusDetail(context.Background(), email)
+	require.NoError(t, err)
+	require.Equal(t, session.LoggedInLocked, detail.Status)
+	require.Equal(t, session.AuthReasonEnvelopeExpired, detail.Reason)
+	require.True(t, detail.HasToken)
+	require.True(t, detail.HasPINProfile)
+	require.True(t, detail.HasEnvelope)
+	require.False(t, detail.EnvelopeValid)
+	require.False(t, detail.SoftUnlockAvailable)
+}
+
+func TestAuthStatusDetailEnvelopeBootChanged(t *testing.T) {
+	email := "user@example.com"
+	ref := session.AccountRef{Email: email, ServerURL: "https://vault.bitwarden.com"}
+
+	profile, err := session.NewPINProfile(ref, "acct-1", "1234", time.Now())
+	require.NoError(t, err)
+
+	bundle := session.TokenBundle{
+		AccountID:    "acct-1",
+		Email:        ref.Email,
+		ServerURL:    ref.ServerURL,
+		AccessToken:  []byte("at"),
+		RefreshToken: []byte("rt"),
+		TokenType:    "Bearer",
+		ExpiresAt:    time.Now().Add(time.Hour),
+	}
+
+	envelope := session.UnlockEnvelope{
+		Version:   session.UnlockEnvelopeVersion,
+		Account:   ref,
+		AccountID: "acct-1",
+		BootID:    "boot-old",
+		ExpiresAt: time.Now().Add(time.Hour),
+	}
+
+	cs := &fakeCredentialStore{
+		tokenBundle: bundle,
+		pinProfile:  profile,
+		envelope:    envelope,
+	}
+	boot := &fakeBootID{id: "boot-new"}
+
+	svc := NewService(Deps{
+		Config:      coreconfig.Default(),
+		Credentials: cs,
+		BootID:      boot,
+	})
+
+	detail, err := svc.AuthStatusDetail(context.Background(), email)
+	require.NoError(t, err)
+	require.Equal(t, session.LoggedInLocked, detail.Status)
+	require.Equal(t, session.AuthReasonBootChanged, detail.Reason)
+	require.True(t, detail.HasToken)
+	require.True(t, detail.HasPINProfile)
+	require.True(t, detail.HasEnvelope)
+	require.False(t, detail.EnvelopeValid)
+	require.False(t, detail.SoftUnlockAvailable)
+}
+
+func TestAuthStatusDetailPINBackoff(t *testing.T) {
+	email := "user@example.com"
+	ref := session.AccountRef{Email: email, ServerURL: "https://vault.bitwarden.com"}
+
+	profile, err := session.NewPINProfile(ref, "acct-1", "1234", time.Now())
+	require.NoError(t, err)
+
+	bundle := session.TokenBundle{
+		AccountID:    "acct-1",
+		Email:        ref.Email,
+		ServerURL:    ref.ServerURL,
+		AccessToken:  []byte("at"),
+		RefreshToken: []byte("rt"),
+		TokenType:    "Bearer",
+		ExpiresAt:    time.Now().Add(time.Hour),
+	}
+
+	envelope := session.UnlockEnvelope{
+		Version:      session.UnlockEnvelopeVersion,
+		Account:      ref,
+		AccountID:    "acct-1",
+		BootID:       "boot-123",
+		ExpiresAt:    time.Now().Add(time.Hour),
+		BackoffUntil: time.Now().Add(time.Minute),
+	}
+
+	cs := &fakeCredentialStore{
+		tokenBundle: bundle,
+		pinProfile:  profile,
+		envelope:    envelope,
+	}
+	boot := &fakeBootID{id: "boot-123"}
+
+	svc := NewService(Deps{
+		Config:      coreconfig.Default(),
+		Credentials: cs,
+		BootID:      boot,
+	})
+
+	detail, err := svc.AuthStatusDetail(context.Background(), email)
+	require.NoError(t, err)
+	require.Equal(t, session.LoggedInLocked, detail.Status)
+	require.Equal(t, session.AuthReasonPINBackoff, detail.Reason)
+	require.True(t, detail.HasToken)
+	require.True(t, detail.HasPINProfile)
+	require.True(t, detail.HasEnvelope)
+	require.False(t, detail.EnvelopeValid)
+	require.False(t, detail.SoftUnlockAvailable)
+}
+
+func TestAuthStatusDetailUnlockEnvelopeLoadErrorReturnsStatus(t *testing.T) {
+	email := "user@example.com"
+	ref := session.AccountRef{Email: email, ServerURL: "https://vault.bitwarden.com"}
+
+	profile, err := session.NewPINProfile(ref, "acct-1", "1234", time.Now())
+	require.NoError(t, err)
+
+	cs := &fakeCredentialStore{
+		tokenBundle: session.TokenBundle{
+			AccountID:    "acct-1",
+			Email:        ref.Email,
+			ServerURL:    ref.ServerURL,
+			AccessToken:  []byte("at"),
+			RefreshToken: []byte("rt"),
+		},
+		pinProfile:      profile,
+		loadEnvelopeErr: errors.New("dbus failed"),
+	}
+
+	svc := NewService(Deps{
+		Config:      coreconfig.Default(),
+		Credentials: cs,
+	})
+
+	detail, err := svc.AuthStatusDetail(context.Background(), email)
+	require.Error(t, err)
+	require.Equal(t, session.KeyringUnavailable, detail.Status)
+	require.Equal(t, session.AuthReasonKeyringUnavailable, detail.Reason)
+}
+
+func TestAuthStatusDetailBootIDErrorReturnsStatus(t *testing.T) {
+	email := "user@example.com"
+	ref := session.AccountRef{Email: email, ServerURL: "https://vault.bitwarden.com"}
+
+	profile, err := session.NewPINProfile(ref, "acct-1", "1234", time.Now())
+	require.NoError(t, err)
+
+	cs := &fakeCredentialStore{
+		tokenBundle: session.TokenBundle{
+			AccountID:    "acct-1",
+			Email:        ref.Email,
+			ServerURL:    ref.ServerURL,
+			AccessToken:  []byte("at"),
+			RefreshToken: []byte("rt"),
+		},
+		pinProfile: profile,
+		envelope: session.UnlockEnvelope{
+			Version:   session.UnlockEnvelopeVersion,
+			Account:   ref,
+			AccountID: "acct-1",
+			BootID:    "boot-123",
+			ExpiresAt: time.Now().Add(time.Hour),
+		},
+	}
+	boot := &fakeBootID{err: errors.New("boot id unavailable")}
+
+	svc := NewService(Deps{
+		Config:      coreconfig.Default(),
+		Credentials: cs,
+		BootID:      boot,
+	})
+
+	detail, err := svc.AuthStatusDetail(context.Background(), email)
+	require.Error(t, err)
+	require.Equal(t, session.LoggedInLocked, detail.Status)
+	require.Equal(t, session.AuthReasonEnvelopeInvalid, detail.Reason)
+}
+
+func TestAuthStatusDetailAuthStatusWrapper(t *testing.T) {
+	email := "user@example.com"
+	ref := session.AccountRef{Email: email, ServerURL: "https://vault.bitwarden.com"}
+
+	profile, err := session.NewPINProfile(ref, "acct-1", "1234", time.Now())
+	require.NoError(t, err)
+
+	bundle := session.TokenBundle{
+		AccountID:    "acct-1",
+		Email:        ref.Email,
+		ServerURL:    ref.ServerURL,
+		AccessToken:  []byte("at"),
+		RefreshToken: []byte("rt"),
+		TokenType:    "Bearer",
+		ExpiresAt:    time.Now().Add(time.Hour),
+	}
+
+	envelope := session.UnlockEnvelope{
+		Version:   session.UnlockEnvelopeVersion,
+		Account:   ref,
+		AccountID: "acct-1",
+		BootID:    "boot-123",
+		ExpiresAt: time.Now().Add(time.Hour),
+	}
+
+	cs := &fakeCredentialStore{
+		tokenBundle: bundle,
+		pinProfile:  profile,
+		envelope:    envelope,
+	}
+	boot := &fakeBootID{id: "boot-123"}
+
+	svc := NewService(Deps{
+		Config:      coreconfig.Default(),
+		Credentials: cs,
+		BootID:      boot,
+	})
+
+	status, err := svc.AuthStatus(context.Background(), email)
+	require.NoError(t, err)
+	require.Equal(t, session.LoggedInUnlockAvailable, status)
+
+	// Verify that AuthStatus and AuthStatusDetail agree.
+	detail, err := svc.AuthStatusDetail(context.Background(), email)
+	require.NoError(t, err)
+	require.Equal(t, status, detail.Status)
+}
+
+// ---------------------------------------------------------------------------
 // ensureFreshTokens tests
 // ---------------------------------------------------------------------------
 
@@ -2013,14 +2569,24 @@ func TestLoginStoresTokenBundleAndPINEnvelope(t *testing.T) {
 	// Token bundle should be saved under email + server.
 	cs.mu.Lock()
 	require.Equal(t, 1, cs.saveTokenCalled)
+	require.Equal(t, 1, cs.savePINCalls)
 	require.Equal(t, 1, cs.saveEnvCalled)
 	cs.mu.Unlock()
 
-	// PIN envelope should have been created with correct material.
+	// PIN profile should be saved and verify the PIN.
+	cs.mu.Lock()
+	savedProfile := cs.savedPINProfile
+	cs.mu.Unlock()
+	require.True(t, savedProfile.VerifyPIN(pin), "saved profile should verify correct PIN")
+	require.False(t, savedProfile.VerifyPIN("9999"), "saved profile should reject wrong PIN")
+
+	// PIN envelope should have been created with correct material, using
+	// the profile's EnvelopeKey as the wrapping secret (not the raw PIN).
 	pe.mu.Lock()
 	require.Equal(t, 1, pe.createCallCnt)
 	require.Equal(t, ref, pe.ref)
-	require.Equal(t, pin, pe.pin)
+	require.NotEqual(t, pin, pe.pin, "envelope Create should use EnvelopeKey secret, not raw PIN")
+	require.Len(t, pe.pin, 64, "EnvelopeKey secret should be 64 hex chars (32 bytes)")
 	require.Equal(t, bootID, pe.bootID)
 	require.Equal(t, []byte("user-key-bytes"), pe.material.UserKey)
 	// CacheKey from unlock (first run with no cache) should be non-empty.
@@ -2515,9 +3081,13 @@ func TestUnlockWithPINSuccessSaveErrorKeepsLocked(t *testing.T) {
 	resetEnvelope.FailedAttempts = 0
 	resetEnvelope.BackoffUntil = time.Time{}
 
+	profile, profileErr := session.NewPINProfile(ref, "acct-1", pin, time.Now())
+	require.NoError(t, profileErr)
+
 	saveErr := fmt.Errorf("keyring write error")
 	cs := &fakeCredentialStore{
 		tokenBundle:     validBundle,
+		pinProfile:      profile,
 		envelope:        envelope,
 		saveEnvelopeErr: saveErr,
 	}
@@ -3254,14 +3824,22 @@ func TestUnlockAndCreateEnvelopeStoresBundleAndEnvelope(t *testing.T) {
 	// Token bundle should be saved.
 	cs.mu.Lock()
 	require.Equal(t, 1, cs.saveTokenCalled)
+	require.Equal(t, 1, cs.savePINCalls)
 	require.Equal(t, 1, cs.saveEnvCalled)
 	cs.mu.Unlock()
 
-	// PIN envelope should have been created with correct parameters.
+	// PIN profile should be saved and verify the PIN.
+	cs.mu.Lock()
+	savedProfile := cs.savedPINProfile
+	cs.mu.Unlock()
+	require.True(t, savedProfile.VerifyPIN(pin), "saved profile should verify correct PIN")
+
+	// PIN envelope should have been created with EnvelopeKey secret (not raw PIN).
 	pe.mu.Lock()
 	require.Equal(t, 1, pe.createCallCnt)
 	require.Equal(t, ref, pe.ref)
-	require.Equal(t, pin, pe.pin)
+	require.NotEqual(t, pin, pe.pin, "envelope Create should use EnvelopeKey secret, not raw PIN")
+	require.Len(t, pe.pin, 64, "EnvelopeKey secret should be 64 hex chars (32 bytes)")
 	require.Equal(t, bootID, pe.bootID)
 	pe.mu.Unlock()
 
@@ -3312,4 +3890,869 @@ func TestUnlockAndCreateEnvelopeFailSavesLeavesLocked(t *testing.T) {
 	svc.mu.Lock()
 	require.Equal(t, auth.LockStateLocked, svc.state)
 	svc.mu.Unlock()
+}
+
+// ---------------------------------------------------------------------------
+// Phase 3: Login profile save failure tests
+// ---------------------------------------------------------------------------
+
+func TestLoginSavePINProfileFailureLeavesLockedAndCleansUp(t *testing.T) {
+	email := "user@example.com"
+	password := "master-password"
+	pin := "1234"
+	bootID := "boot-abc"
+
+	fr := &fakeRemote{
+		exportMaterial: session.UnlockMaterial{UserKey: []byte("user-key-bytes")},
+		exportTokens: session.TokenBundle{
+			AccountID:    "acct-1",
+			AccessToken:  []byte("access-token"),
+			RefreshToken: []byte("refresh-token"),
+			TokenType:    "Bearer",
+			ExpiresAt:    time.Now().Add(time.Hour),
+		},
+	}
+
+	saveProfileErr := fmt.Errorf("keyring write error")
+	cs := &fakeCredentialStore{savePINProfileErr: saveProfileErr}
+	pe := &fakePINEnvelope{
+		result: session.UnlockEnvelope{Version: session.UnlockEnvelopeVersion, BootID: bootID},
+	}
+	boot := &fakeBootID{id: bootID}
+	fakCache := &fakeCache{loadErr: os.ErrNotExist}
+
+	svc := NewService(Deps{
+		Remote:      fr,
+		Cache:       fakCache,
+		SecretBox:   &fakeSecretBox{},
+		Credentials: cs,
+		BootID:      boot,
+		PINEnvelope: pe,
+		Config:      coreconfig.Default(),
+	})
+
+	input := auth.LoginInput{
+		Email:    email,
+		Password: password,
+		PIN:      pin,
+	}
+
+	err := svc.Login(context.Background(), input)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "save pin profile")
+
+	// Token bundle should have been saved, then best-effort cleanup should
+	// remove any partially written credential state.
+	cs.mu.Lock()
+	require.Equal(t, 1, cs.saveTokenCalled, "token bundle should be saved before profile")
+	require.Equal(t, 1, cs.delTokenCalls, "token bundle should be cleaned up on profile failure")
+	require.Equal(t, 1, cs.delPINCalls, "PIN profile cleanup should be attempted on profile failure")
+	require.Equal(t, 1, cs.delEnvCalls, "unlock envelope cleanup should be attempted on profile failure")
+	require.Equal(t, 0, cs.saveEnvCalled, "envelope should not be saved")
+	cs.mu.Unlock()
+
+	// Service should be locked after cleanup.
+	svc.mu.Lock()
+	require.Equal(t, auth.LockStateLocked, svc.state)
+	svc.mu.Unlock()
+}
+
+func TestLoginSaveEnvelopeFailureWithProfileCleansUpProfile(t *testing.T) {
+	email := "user@example.com"
+	password := "master-password"
+	pin := "1234"
+	bootID := "boot-abc"
+
+	fr := &fakeRemote{
+		exportMaterial: session.UnlockMaterial{UserKey: []byte("user-key-bytes")},
+		exportTokens: session.TokenBundle{
+			AccountID:    "acct-1",
+			AccessToken:  []byte("access-token"),
+			RefreshToken: []byte("refresh-token"),
+			TokenType:    "Bearer",
+			ExpiresAt:    time.Now().Add(time.Hour),
+		},
+	}
+
+	saveEnvErr := fmt.Errorf("keyring write error")
+	cs := &fakeCredentialStore{saveEnvelopeErr: saveEnvErr}
+	pe := &fakePINEnvelope{
+		result: session.UnlockEnvelope{Version: session.UnlockEnvelopeVersion, BootID: bootID},
+	}
+	boot := &fakeBootID{id: bootID}
+	fakCache := &fakeCache{loadErr: os.ErrNotExist}
+
+	svc := NewService(Deps{
+		Remote:      fr,
+		Cache:       fakCache,
+		SecretBox:   &fakeSecretBox{},
+		Credentials: cs,
+		BootID:      boot,
+		PINEnvelope: pe,
+		Config:      coreconfig.Default(),
+	})
+
+	input := auth.LoginInput{
+		Email:    email,
+		Password: password,
+		PIN:      pin,
+	}
+
+	err := svc.Login(context.Background(), input)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "save unlock envelope")
+
+	// Token bundle and PIN profile should be cleaned up on envelope save failure.
+	cs.mu.Lock()
+	require.Equal(t, 1, cs.delTokenCalls, "token bundle should be deleted on envelope failure")
+	require.Equal(t, 1, cs.delPINCalls, "pin profile should be deleted on envelope failure")
+	cs.mu.Unlock()
+
+	// Service should be locked after cleanup.
+	svc.mu.Lock()
+	require.Equal(t, auth.LockStateLocked, svc.state)
+	svc.mu.Unlock()
+}
+
+// ---------------------------------------------------------------------------
+// Phase 3: RenewUnlockEnvelope tests
+// ---------------------------------------------------------------------------
+
+func TestRenewUnlockEnvelopeExistingProfileCreatesEnvelopeWithoutPIN(t *testing.T) {
+	email := "user@example.com"
+	password := "master-password"
+	pin := "1234"
+	ref := session.AccountRef{Email: email, ServerURL: "https://vault.bitwarden.com"}
+	bootID := "boot-renew"
+
+	profile, err := session.NewPINProfile(ref, "acct-1", pin, time.Now())
+	require.NoError(t, err)
+
+	fr := &fakeRemote{
+		exportMaterial: session.UnlockMaterial{UserKey: []byte("user-key-bytes")},
+		exportTokens: session.TokenBundle{
+			AccountID:    "acct-1",
+			AccessToken:  []byte("access-token"),
+			RefreshToken: []byte("refresh-token"),
+			TokenType:    "Bearer",
+			ExpiresAt:    time.Now().Add(time.Hour),
+		},
+	}
+
+	validBundle := session.TokenBundle{
+		AccountID:    "acct-1",
+		Email:        ref.Email,
+		ServerURL:    ref.ServerURL,
+		AccessToken:  []byte("at"),
+		RefreshToken: []byte("rt"),
+		TokenType:    "Bearer",
+		ExpiresAt:    time.Now().Add(time.Hour),
+	}
+
+	cs := &fakeCredentialStore{
+		tokenBundle: validBundle,
+		pinProfile:  profile,
+	}
+	pe := &fakePINEnvelope{
+		result: session.UnlockEnvelope{Version: session.UnlockEnvelopeVersion, BootID: bootID},
+	}
+	boot := &fakeBootID{id: bootID}
+	fakCache := &fakeCache{loadErr: os.ErrNotExist}
+
+	svc := NewService(Deps{
+		Remote:      fr,
+		Cache:       fakCache,
+		SecretBox:   &fakeSecretBox{},
+		Credentials: cs,
+		BootID:      boot,
+		PINEnvelope: pe,
+		Config:      coreconfig.Default(),
+	})
+
+	// Renew with existing profile: no PIN required, SetupNewPIN=false.
+	input := auth.RenewEnvelopeInput{
+		Email:       email,
+		Password:    password,
+		PIN:         "", // irrelevant when SetupNewPIN=false
+		SetupNewPIN: false,
+	}
+
+	err = svc.RenewUnlockEnvelope(context.Background(), input)
+	require.NoError(t, err)
+
+	// Verify remote login was called (master password).
+	fr.mu.Lock()
+	require.True(t, fr.loginCalled)
+	fr.mu.Unlock()
+
+	// Envelope should be created using EnvelopeKey, not raw PIN.
+	pe.mu.Lock()
+	require.Equal(t, 1, pe.createCallCnt)
+	require.NotEqual(t, pin, pe.pin, "Create should use EnvelopeKey, not raw PIN")
+	require.Len(t, pe.pin, 64, "EnvelopeKey secret should be 64 hex chars")
+	pe.mu.Unlock()
+
+	// Token bundle and envelope should be saved.
+	cs.mu.Lock()
+	require.True(t, cs.saveTokenCalled >= 1)
+	require.True(t, cs.saveEnvCalled >= 1)
+	cs.mu.Unlock()
+
+	// Service should be unlocked.
+	svc.mu.Lock()
+	require.Equal(t, auth.LockStateUnlocked, svc.state)
+	svc.mu.Unlock()
+}
+
+func TestRenewUnlockEnvelopeMissingProfileRequiresSetupNewPIN(t *testing.T) {
+	email := "user@example.com"
+	password := "master-password"
+	pin := "5678"
+	ref := session.AccountRef{Email: email, ServerURL: "https://vault.bitwarden.com"}
+	bootID := "boot-renew-new"
+
+	fr := &fakeRemote{
+		exportMaterial: session.UnlockMaterial{UserKey: []byte("user-key-bytes")},
+		exportTokens: session.TokenBundle{
+			AccountID:    "acct-1",
+			AccessToken:  []byte("access-token"),
+			RefreshToken: []byte("refresh-token"),
+			TokenType:    "Bearer",
+			ExpiresAt:    time.Now().Add(time.Hour),
+		},
+	}
+
+	validBundle := session.TokenBundle{
+		AccountID:    "acct-1",
+		Email:        ref.Email,
+		ServerURL:    ref.ServerURL,
+		AccessToken:  []byte("at"),
+		RefreshToken: []byte("rt"),
+		TokenType:    "Bearer",
+		ExpiresAt:    time.Now().Add(time.Hour),
+	}
+
+	cs := &fakeCredentialStore{
+		tokenBundle:       validBundle,
+		loadPINProfileErr: coreerrors.ErrNotFound,
+	}
+	pe := &fakePINEnvelope{
+		result: session.UnlockEnvelope{Version: session.UnlockEnvelopeVersion, BootID: bootID},
+	}
+	boot := &fakeBootID{id: bootID}
+	fakCache := &fakeCache{loadErr: os.ErrNotExist}
+
+	svc := NewService(Deps{
+		Remote:      fr,
+		Cache:       fakCache,
+		SecretBox:   &fakeSecretBox{},
+		Credentials: cs,
+		BootID:      boot,
+		PINEnvelope: pe,
+		Config:      coreconfig.Default(),
+	})
+
+	// Missing profile + SetupNewPIN=false should fail.
+	input := auth.RenewEnvelopeInput{
+		Email:       email,
+		Password:    password,
+		SetupNewPIN: false,
+	}
+	err := svc.RenewUnlockEnvelope(context.Background(), input)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "no PIN profile exists")
+
+	// Missing profile + SetupNewPIN=true + empty PIN should fail.
+	input = auth.RenewEnvelopeInput{
+		Email:       email,
+		Password:    password,
+		PIN:         "",
+		SetupNewPIN: true,
+	}
+	err = svc.RenewUnlockEnvelope(context.Background(), input)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "PIN is required")
+
+	// Missing profile + short PIN should fail.
+	input = auth.RenewEnvelopeInput{
+		Email:       email,
+		Password:    password,
+		PIN:         "12",
+		SetupNewPIN: true,
+	}
+	err = svc.RenewUnlockEnvelope(context.Background(), input)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "PIN must be at least")
+
+	// Missing profile + SetupNewPIN=true + valid PIN should succeed.
+	input = auth.RenewEnvelopeInput{
+		Email:       email,
+		Password:    password,
+		PIN:         pin,
+		SetupNewPIN: true,
+	}
+	err = svc.RenewUnlockEnvelope(context.Background(), input)
+	require.NoError(t, err)
+
+	// Profile should be created and saved.
+	cs.mu.Lock()
+	require.Equal(t, 1, cs.savePINCalls, "PIN profile should be saved")
+	savedProfile := cs.savedPINProfile
+	cs.mu.Unlock()
+	require.True(t, savedProfile.VerifyPIN(pin), "saved profile should verify PIN")
+
+	// Envelope should use EnvelopeKey, not raw PIN.
+	pe.mu.Lock()
+	require.Equal(t, 1, pe.createCallCnt)
+	require.NotEqual(t, pin, pe.pin, "Create should use EnvelopeKey, not raw PIN")
+	require.Len(t, pe.pin, 64, "EnvelopeKey secret should be 64 hex chars")
+	pe.mu.Unlock()
+}
+
+func TestRenewUnlockEnvelopeSaveFailureCleansUp(t *testing.T) {
+	email := "user@example.com"
+	password := "master-password"
+	ref := session.AccountRef{Email: email, ServerURL: "https://vault.bitwarden.com"}
+
+	fr := &fakeRemote{
+		exportMaterial: session.UnlockMaterial{UserKey: []byte("user-key-bytes")},
+		exportTokens: session.TokenBundle{
+			AccountID:    "acct-1",
+			AccessToken:  []byte("at"),
+			RefreshToken: []byte("rt"),
+			TokenType:    "Bearer",
+			ExpiresAt:    time.Now().Add(time.Hour),
+		},
+	}
+
+	validBundle := session.TokenBundle{
+		AccountID:    "acct-1",
+		Email:        ref.Email,
+		ServerURL:    ref.ServerURL,
+		AccessToken:  []byte("at"),
+		RefreshToken: []byte("rt"),
+		TokenType:    "Bearer",
+		ExpiresAt:    time.Now().Add(time.Hour),
+	}
+
+	profile, err := session.NewPINProfile(ref, "acct-1", "1234", time.Now())
+	require.NoError(t, err)
+
+	// Envelope save will fail.
+	cs := &fakeCredentialStore{
+		tokenBundle:     validBundle,
+		pinProfile:      profile,
+		saveEnvelopeErr: fmt.Errorf("keyring write error"),
+	}
+	pe := &fakePINEnvelope{
+		result: session.UnlockEnvelope{Version: session.UnlockEnvelopeVersion, BootID: "boot-renew"},
+	}
+	boot := &fakeBootID{id: "boot-renew"}
+	fakCache := &fakeCache{loadErr: os.ErrNotExist}
+
+	svc := NewService(Deps{
+		Remote:      fr,
+		Cache:       fakCache,
+		SecretBox:   &fakeSecretBox{},
+		Credentials: cs,
+		BootID:      boot,
+		PINEnvelope: pe,
+		Config:      coreconfig.Default(),
+	})
+
+	input := auth.RenewEnvelopeInput{
+		Email:       email,
+		Password:    password,
+		SetupNewPIN: false,
+	}
+
+	err = svc.RenewUnlockEnvelope(context.Background(), input)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "save unlock envelope")
+
+	// Existing-profile renewal must preserve token/profile credentials on
+	// envelope save failure; only a partial envelope cleanup is attempted.
+	cs.mu.Lock()
+	require.Equal(t, 0, cs.delTokenCalls)
+	require.Equal(t, 0, cs.delPINCalls)
+	require.Equal(t, 1, cs.delEnvCalls)
+	cs.mu.Unlock()
+
+	// Service should be locked after cleanup.
+	svc.mu.Lock()
+	require.Equal(t, auth.LockStateLocked, svc.state)
+	svc.mu.Unlock()
+}
+
+// ---------------------------------------------------------------------------
+// Phase 3: SoftLock / HardLock tests
+// ---------------------------------------------------------------------------
+
+func TestSoftLockClearsResidentState(t *testing.T) {
+	gitItem := vault.Item{
+		ID:   "item-1",
+		Name: "GitHub",
+		Type: vault.ItemTypeLogin,
+	}
+	snap := buildValidSnapshot(t, "pw", []vault.Item{gitItem}, nil)
+
+	svc := NewService(Deps{
+		Cache:     &fakeCache{data: &snap},
+		SecretBox: &fakeSecretBox{},
+	})
+
+	// Unlock
+	err := svc.Unlock(context.Background(), "user@test.com", "pw")
+	require.NoError(t, err)
+
+	// Verify unlocked state
+	_, err = svc.Search(context.Background(), "git", 10)
+	require.NoError(t, err)
+
+	// SoftLock
+	err = svc.SoftLock(context.Background())
+	require.NoError(t, err)
+
+	// Search after SoftLock returns error
+	_, err = svc.Search(context.Background(), "git", 10)
+	require.ErrorIs(t, err, coreerrors.ErrLocked)
+
+	// Items after SoftLock returns error
+	_, err = svc.Items(context.Background())
+	require.ErrorIs(t, err, coreerrors.ErrLocked)
+
+	// Verify state is locked
+	svc.mu.Lock()
+	require.Equal(t, auth.LockStateLocked, svc.state)
+	require.Nil(t, svc.items)
+	require.Nil(t, svc.index)
+	svc.mu.Unlock()
+}
+
+func TestSoftLockDoesNotDeleteEnvelopeOrProfile(t *testing.T) {
+	email := "user@example.com"
+	ref := session.AccountRef{Email: email, ServerURL: "https://vault.bitwarden.com"}
+
+	profile, err := session.NewPINProfile(ref, "acct-1", "1234", time.Now())
+	require.NoError(t, err)
+
+	bundle := session.TokenBundle{
+		AccountID:    "acct-1",
+		Email:        ref.Email,
+		ServerURL:    ref.ServerURL,
+		AccessToken:  []byte("at"),
+		RefreshToken: []byte("rt"),
+		TokenType:    "Bearer",
+		ExpiresAt:    time.Now().Add(time.Hour),
+	}
+
+	cs := &fakeCredentialStore{
+		tokenBundle: bundle,
+		pinProfile:  profile,
+		envelope: session.UnlockEnvelope{
+			Version:   session.UnlockEnvelopeVersion,
+			Account:   ref,
+			BootID:    "boot-123",
+			ExpiresAt: time.Now().Add(time.Hour),
+		},
+	}
+
+	svc := NewService(Deps{
+		Config:      coreconfig.Default(),
+		Credentials: cs,
+	})
+
+	err = svc.SoftLock(context.Background())
+	require.NoError(t, err)
+
+	// SoftLock should NOT delete token, profile, or envelope.
+	cs.mu.Lock()
+	require.Equal(t, 0, cs.delTokenCalls, "SoftLock must not delete token bundle")
+	require.Equal(t, 0, cs.delPINCalls, "SoftLock must not delete PIN profile")
+	require.Equal(t, 0, cs.delEnvCalls, "SoftLock must not delete unlock envelope")
+	cs.mu.Unlock()
+}
+
+func TestHardLockDeletesEnvelopeOnly(t *testing.T) {
+	email := "user@example.com"
+	ref := session.AccountRef{Email: email, ServerURL: "https://vault.bitwarden.com"}
+
+	profile, err := session.NewPINProfile(ref, "acct-1", "1234", time.Now())
+	require.NoError(t, err)
+
+	bundle := session.TokenBundle{
+		AccountID:    "acct-1",
+		Email:        ref.Email,
+		ServerURL:    ref.ServerURL,
+		AccessToken:  []byte("at"),
+		RefreshToken: []byte("rt"),
+		TokenType:    "Bearer",
+		ExpiresAt:    time.Now().Add(time.Hour),
+	}
+
+	cs := &fakeCredentialStore{
+		tokenBundle: bundle,
+		pinProfile:  profile,
+	}
+
+	svc := NewService(Deps{
+		Config:      coreconfig.Default(),
+		Credentials: cs,
+	})
+
+	err = svc.HardLock(context.Background(), email)
+	require.NoError(t, err)
+
+	// HardLock should delete envelope only.
+	cs.mu.Lock()
+	require.Equal(t, 1, cs.delEnvCalls, "HardLock should delete unlock envelope")
+	require.Equal(t, 0, cs.delTokenCalls, "HardLock must not delete token bundle")
+	require.Equal(t, 0, cs.delPINCalls, "HardLock must not delete PIN profile")
+	cs.mu.Unlock()
+
+	// Service should be locked.
+	svc.mu.Lock()
+	require.Equal(t, auth.LockStateLocked, svc.state)
+	svc.mu.Unlock()
+}
+
+func TestLockCompatibilityWrapper(t *testing.T) {
+	// Lock() should behave identically to SoftLock() for resident state clearing.
+	gitItem := vault.Item{
+		ID:   "item-1",
+		Name: "GitHub",
+		Type: vault.ItemTypeLogin,
+	}
+	snap := buildValidSnapshot(t, "pw", []vault.Item{gitItem}, nil)
+
+	svc := NewService(Deps{
+		Cache:     &fakeCache{data: &snap},
+		SecretBox: &fakeSecretBox{},
+	})
+
+	err := svc.Unlock(context.Background(), "user@test.com", "pw")
+	require.NoError(t, err)
+
+	_, err = svc.Search(context.Background(), "git", 10)
+	require.NoError(t, err)
+
+	err = svc.Lock(context.Background())
+	require.NoError(t, err)
+
+	_, err = svc.Search(context.Background(), "git", 10)
+	require.ErrorIs(t, err, coreerrors.ErrLocked)
+
+	svc.mu.Lock()
+	require.Equal(t, auth.LockStateLocked, svc.state)
+	svc.mu.Unlock()
+}
+
+// ---------------------------------------------------------------------------
+// Phase 3: UnlockWithPIN profile and migration tests
+// ---------------------------------------------------------------------------
+
+func TestUnlockWithPINProfileVerifiesPINUsesEnvelopeKey(t *testing.T) {
+	email := "user@example.com"
+	pin := "1234"
+	ref := session.AccountRef{Email: email, ServerURL: "https://vault.bitwarden.com"}
+	bootID := "boot-abc"
+
+	validBundle := session.TokenBundle{
+		AccountID:    "acct-1",
+		Email:        ref.Email,
+		ServerURL:    ref.ServerURL,
+		AccessToken:  []byte("at"),
+		RefreshToken: []byte("rt"),
+		TokenType:    "Bearer",
+		ExpiresAt:    time.Now().Add(time.Hour),
+	}
+
+	envelope := session.UnlockEnvelope{
+		Version:   session.UnlockEnvelopeVersion,
+		Account:   ref,
+		AccountID: "acct-1",
+		BootID:    bootID,
+		ExpiresAt: time.Now().Add(time.Hour),
+	}
+
+	material := session.UnlockMaterial{
+		CacheKey: []byte("cache-key-from-material"),
+		UserKey:  []byte("user-key"),
+	}
+
+	profile, err := session.NewPINProfile(ref, "acct-1", pin, time.Now())
+	require.NoError(t, err)
+
+	cs := &fakeCredentialStore{
+		tokenBundle: validBundle,
+		pinProfile:  profile,
+		envelope:    envelope,
+	}
+	pe := &fakePINEnvelope{
+		openMaterial: material,
+		openUpdated:  envelope.Clone(),
+		openErr:      nil,
+	}
+	boot := &fakeBootID{id: bootID}
+	fr := &fakeRemote{}
+
+	cfg := coreconfig.Default()
+	cfg.Bitwarden.Email = email
+
+	svc := NewService(Deps{
+		Config:      cfg,
+		Remote:      fr,
+		Credentials: cs,
+		BootID:      boot,
+		PINEnvelope: pe,
+	})
+
+	err = svc.UnlockWithPIN(context.Background(), email, pin)
+	require.NoError(t, err)
+
+	// Profile should have been loaded.
+	cs.mu.Lock()
+	require.Equal(t, 1, cs.loadPINCalls)
+	cs.mu.Unlock()
+
+	// Open should have been called with EnvelopeKey secret, not raw PIN.
+	pe.mu.Lock()
+	require.Equal(t, 1, pe.openCallCnt)
+	require.NotEqual(t, pin, pe.openPin, "Open should use EnvelopeKey secret, not raw PIN")
+	require.Len(t, pe.openPin, 64, "EnvelopeKey secret should be 64 hex chars")
+	pe.mu.Unlock()
+
+	// State should be unlocked.
+	svc.mu.Lock()
+	require.Equal(t, auth.LockStateUnlocked, svc.state)
+	svc.mu.Unlock()
+}
+
+func TestUnlockWithPINProfileWrongPINRecordsFailure(t *testing.T) {
+	email := "user@example.com"
+	correctPIN := "1234"
+	wrongPIN := "9999"
+	ref := session.AccountRef{Email: email, ServerURL: "https://vault.bitwarden.com"}
+	bootID := "boot-abc"
+
+	validBundle := session.TokenBundle{
+		AccountID:    "acct-1",
+		Email:        ref.Email,
+		ServerURL:    ref.ServerURL,
+		AccessToken:  []byte("at"),
+		RefreshToken: []byte("rt"),
+		TokenType:    "Bearer",
+		ExpiresAt:    time.Now().Add(time.Hour),
+	}
+
+	envelope := session.UnlockEnvelope{
+		Version:        session.UnlockEnvelopeVersion,
+		Account:        ref,
+		AccountID:      "acct-1",
+		BootID:         bootID,
+		ExpiresAt:      time.Now().Add(time.Hour),
+		FailedAttempts: 0,
+		PINMaxFailures: 5,
+	}
+
+	profile, err := session.NewPINProfile(ref, "acct-1", correctPIN, time.Now())
+	require.NoError(t, err)
+
+	updatedEnvelope := envelope.Clone()
+	updatedEnvelope.FailedAttempts = 1
+	updatedEnvelope.BackoffUntil = time.Now().Add(time.Second)
+
+	cs := &fakeCredentialStore{
+		tokenBundle: validBundle,
+		pinProfile:  profile,
+		envelope:    envelope,
+	}
+	pe := &fakePINEnvelope{
+		openUpdated: updatedEnvelope,
+		openErr:     fmt.Errorf("pinenvelope: invalid pin"),
+	}
+	boot := &fakeBootID{id: bootID}
+	fr := &fakeRemote{}
+
+	cfg := coreconfig.Default()
+	cfg.Bitwarden.Email = email
+
+	svc := NewService(Deps{
+		Config:      cfg,
+		Remote:      fr,
+		Credentials: cs,
+		BootID:      boot,
+		PINEnvelope: pe,
+	})
+
+	err = svc.UnlockWithPIN(context.Background(), email, wrongPIN)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "invalid pin")
+
+	// Open should have been called with the WRONG (human) PIN to trigger counters.
+	pe.mu.Lock()
+	require.Equal(t, 1, pe.openCallCnt)
+	require.Equal(t, wrongPIN, pe.openPin, "wrong PIN should be passed to Open for counter increment")
+	pe.mu.Unlock()
+
+	// State should remain locked.
+	svc.mu.Lock()
+	require.Equal(t, auth.LockStateLocked, svc.state)
+	svc.mu.Unlock()
+
+	// RestoreSession must NOT be called.
+	fr.mu.Lock()
+	require.Equal(t, 0, fr.restoreCallCnt)
+	fr.mu.Unlock()
+
+	// Envelope should be saved with updated counters.
+	cs.mu.Lock()
+	require.Equal(t, 1, cs.saveEnvCalled)
+	require.Equal(t, 1, cs.savedUnlockEnvelope.FailedAttempts)
+	cs.mu.Unlock()
+}
+
+func TestUnlockWithPINMigrationSavesProfileAfterSuccess(t *testing.T) {
+	email := "user@example.com"
+	pin := "1234"
+	ref := session.AccountRef{Email: email, ServerURL: "https://vault.bitwarden.com"}
+	bootID := "boot-abc"
+
+	validBundle := session.TokenBundle{
+		AccountID:    "acct-1",
+		Email:        ref.Email,
+		ServerURL:    ref.ServerURL,
+		AccessToken:  []byte("at"),
+		RefreshToken: []byte("rt"),
+		TokenType:    "Bearer",
+		ExpiresAt:    time.Now().Add(time.Hour),
+	}
+
+	envelope := session.UnlockEnvelope{
+		Version:   session.UnlockEnvelopeVersion,
+		Account:   ref,
+		AccountID: "acct-1",
+		BootID:    bootID,
+		ExpiresAt: time.Now().Add(time.Hour),
+	}
+
+	material := session.UnlockMaterial{
+		CacheKey: []byte("cache-key"),
+		UserKey:  []byte("user-key"),
+	}
+
+	// No PINProfile in store (migration scenario).
+	cs := &fakeCredentialStore{
+		tokenBundle:       validBundle,
+		loadPINProfileErr: coreerrors.ErrNotFound,
+		envelope:          envelope,
+	}
+	pe := &fakePINEnvelope{
+		openMaterial: material,
+		openUpdated:  envelope.Clone(),
+		openErr:      nil,
+	}
+	boot := &fakeBootID{id: bootID}
+	fr := &fakeRemote{}
+
+	cfg := coreconfig.Default()
+	cfg.Bitwarden.Email = email
+
+	svc := NewService(Deps{
+		Config:      cfg,
+		Remote:      fr,
+		Credentials: cs,
+		BootID:      boot,
+		PINEnvelope: pe,
+	})
+
+	err := svc.UnlockWithPIN(context.Background(), email, pin)
+	require.NoError(t, err)
+
+	// PIN profile should have been created from the migration path.
+	cs.mu.Lock()
+	require.Equal(t, 1, cs.savePINCalls, "migration should save a new PIN profile")
+	savedProfile := cs.savedPINProfile
+	cs.mu.Unlock()
+	require.True(t, savedProfile.VerifyPIN(pin), "migration profile should verify the PIN")
+
+	// Open should have been called with the raw PIN (migration, no profile).
+	pe.mu.Lock()
+	require.Equal(t, 1, pe.openCallCnt)
+	require.Equal(t, pin, pe.openPin, "migration should use raw PIN to open old envelope")
+	pe.mu.Unlock()
+
+	// Migration should rewrap and save the legacy envelope with the new
+	// profile EnvelopeKey so future profile-backed unlocks can succeed.
+	cs.mu.Lock()
+	require.Equal(t, 1, cs.saveEnvCalled, "migration should save a rewrapped envelope")
+	cs.mu.Unlock()
+
+	// State should be unlocked after successful migration.
+	svc.mu.Lock()
+	require.Equal(t, auth.LockStateUnlocked, svc.state)
+	svc.mu.Unlock()
+}
+
+func TestUnlockWithPINMigrationRewrappedEnvelopeSupportsNextUnlock(t *testing.T) {
+	email := "user@example.com"
+	pin := "1234"
+	ref := session.AccountRef{Email: email, ServerURL: "https://vault.bitwarden.com"}
+	bootID := "boot-abc"
+
+	validBundle := session.TokenBundle{
+		AccountID:    "acct-1",
+		Email:        ref.Email,
+		ServerURL:    ref.ServerURL,
+		AccessToken:  []byte("at"),
+		RefreshToken: []byte("rt"),
+		TokenType:    "Bearer",
+		ExpiresAt:    time.Now().Add(time.Hour),
+	}
+	envelope := session.UnlockEnvelope{
+		Version:   session.UnlockEnvelopeVersion,
+		Account:   ref,
+		AccountID: "acct-1",
+		BootID:    bootID,
+		ExpiresAt: time.Now().Add(time.Hour),
+	}
+	material := session.UnlockMaterial{CacheKey: []byte("cache-key"), UserKey: []byte("user-key")}
+
+	cs := &fakeCredentialStore{
+		tokenBundle:       validBundle,
+		loadPINProfileErr: coreerrors.ErrNotFound,
+		envelope:          envelope,
+	}
+	pe := &fakePINEnvelope{
+		openMaterial: material,
+		openUpdated:  envelope.Clone(),
+		openErr:      nil,
+		result:       envelope.Clone(),
+	}
+	boot := &fakeBootID{id: bootID}
+	fr := &fakeRemote{}
+	cfg := coreconfig.Default()
+	cfg.Bitwarden.Email = email
+
+	svc := NewService(Deps{
+		Config:      cfg,
+		Remote:      fr,
+		Credentials: cs,
+		BootID:      boot,
+		PINEnvelope: pe,
+	})
+
+	require.NoError(t, svc.UnlockWithPIN(context.Background(), email, pin))
+	cs.mu.Lock()
+	savedProfile := cs.savedPINProfile.Clone()
+	cs.mu.Unlock()
+
+	require.NoError(t, svc.SoftLock(context.Background()))
+	require.NoError(t, svc.UnlockWithPIN(context.Background(), email, pin))
+
+	pe.mu.Lock()
+	require.Equal(t, 2, pe.openCallCnt)
+	require.Equal(t, envelopeKeyToSecret(savedProfile.EnvelopeKey), pe.openPin)
+	require.NotEqual(t, pin, pe.openPin)
+	pe.mu.Unlock()
 }

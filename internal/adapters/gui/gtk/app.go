@@ -123,7 +123,12 @@ func (o *Overlay) Run(ctx context.Context) error {
 
 		// Create the omnibox View. It builds its own widgets and manages its
 		// own lifecycle via the context.
-		ob = omnibox.New(ctx, o.service, func() { app.Quit() }, o.retain)
+		ob = omnibox.New(ctx, o.service, func() {
+			if ob != nil {
+				ob.ClearSensitiveState()
+			}
+			app.Quit()
+		}, o.retain)
 		centerBox.Append(&ob.Root.Widget)
 
 		window.SetChild(&centerBox.Widget)
@@ -131,8 +136,11 @@ func (o *Overlay) Run(ctx context.Context) error {
 		// Attach keyboard controller to the window.
 		ob.AttachKeyController(&window.Window)
 
-		// Close request quits the application.
+		// Close request clears temporary omnibox secrets and quits the application.
 		closeCb := func(_ gtklib.Window) bool {
+			if ob != nil {
+				ob.ClearSensitiveState()
+			}
 			app.Quit()
 			return true
 		}
@@ -155,7 +163,12 @@ func (o *Overlay) Run(ctx context.Context) error {
 	go func() {
 		select {
 		case <-ctx.Done():
-			idleAddOnce(func() { app.Quit() })
+			idleAddOnce(func() {
+				if ob != nil {
+					ob.ClearSensitiveState()
+				}
+				app.Quit()
+			})
 		case <-quitCh:
 			// app.Run already returned; nothing to do.
 		}
