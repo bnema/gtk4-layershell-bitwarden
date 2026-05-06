@@ -8,14 +8,17 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"time"
 
 	sdk "github.com/bnema/bitwarden-go-sdk/bitwarden"
 	coreauth "github.com/bnema/gtk4-layershell-bitwarden/internal/core/auth"
 	coreconfig "github.com/bnema/gtk4-layershell-bitwarden/internal/core/config"
 	coreerrors "github.com/bnema/gtk4-layershell-bitwarden/internal/core/errors"
+	safelog "github.com/bnema/gtk4-layershell-bitwarden/internal/core/logging"
 	coresession "github.com/bnema/gtk4-layershell-bitwarden/internal/core/session"
 	corevault "github.com/bnema/gtk4-layershell-bitwarden/internal/core/vault"
 	"github.com/bnema/gtk4-layershell-bitwarden/internal/ports/out"
+	"github.com/bnema/zerowrap"
 )
 
 // Compile-time check that Client satisfies out.RemoteVault.
@@ -76,13 +79,56 @@ func NewFromSDKWithHTTPClient(client *sdk.Client, hc *http.Client) *Client {
 	return &Client{sdk: client, httpClient: hc}
 }
 
+func remoteLog(ctx context.Context, operation string) zerowrap.Logger {
+	return zerowrap.Logger{Logger: zerowrap.FromCtx(ctx).
+		With().
+		Str(zerowrap.FieldComponent, "remote.bitwarden").
+		Str(zerowrap.FieldOperation, operation).
+		Logger()}
+}
+
+func logRemoteStart(ctx context.Context, operation string) (zerowrap.Logger, time.Time) {
+	log := remoteLog(ctx, operation)
+	log.Info().Msg("remote operation started")
+	return log, time.Now()
+}
+
+func logRemoteFinish(log zerowrap.Logger, started time.Time, err error) {
+	event := log.Info()
+	msg := "remote operation finished"
+	if err != nil {
+		event = log.Error().Str("error_kind", safelog.SafeErrorKind(err))
+		msg = "remote operation failed"
+	}
+	event.Int64(zerowrap.FieldDuration, time.Since(started).Milliseconds()).Msg(msg)
+}
+
+func logRemoteFinishCounts(log zerowrap.Logger, started time.Time, err error, itemCount, folderCount int) {
+	event := log.Info()
+	msg := "remote operation finished"
+	if err != nil {
+		event = log.Error().Str("error_kind", safelog.SafeErrorKind(err))
+		msg = "remote operation failed"
+	}
+	event.
+		Int("item_count", itemCount).
+		Int("folder_count", folderCount).
+		Int64(zerowrap.FieldDuration, time.Since(started).Milliseconds()).
+		Msg(msg)
+}
+
 // Login authenticates with master password.
-func (c *Client) Login(ctx context.Context, email, password string) error {
+func (c *Client) Login(ctx context.Context, email, password string) (retErr error) {
+	log, started := logRemoteStart(ctx, "login")
+	defer func() { logRemoteFinish(log, started, retErr) }()
 	return c.sdk.Login(ctx, loginOptions(email, password))
 }
 
 // BeginLogin starts login and returns a two-factor challenge when required.
-func (c *Client) BeginLogin(ctx context.Context, email, password string) (*coreauth.TwoFactorChallenge, error) {
+func (c *Client) BeginLogin(ctx context.Context, email, password string) (challengeResult *coreauth.TwoFactorChallenge, retErr error) {
+	log, started := logRemoteStart(ctx, "begin_login")
+	defer func() { logRemoteFinish(log, started, retErr) }()
+
 	result, err := c.sdk.BeginLogin(ctx, loginOptions(email, password))
 	if err != nil {
 		return nil, err
@@ -99,7 +145,10 @@ func (c *Client) BeginLogin(ctx context.Context, email, password string) (*corea
 }
 
 // CompleteTwoFactorLogin completes a challenge returned by BeginLogin.
-func (c *Client) CompleteTwoFactorLogin(ctx context.Context, challenge *coreauth.TwoFactorChallenge, provider coreauth.TwoFactorProvider, code string, remember bool) error {
+func (c *Client) CompleteTwoFactorLogin(ctx context.Context, challenge *coreauth.TwoFactorChallenge, provider coreauth.TwoFactorProvider, code string, remember bool) (retErr error) {
+	log, started := logRemoteStart(ctx, "complete_two_factor_login")
+	defer func() { logRemoteFinish(log, started, retErr) }()
+
 	if challenge == nil {
 		return ErrTwoFactorUnsupported
 	}
@@ -118,7 +167,9 @@ func (c *Client) CompleteTwoFactorLogin(ctx context.Context, challenge *coreauth
 
 // CompleteTwoFactor returns ErrTwoFactorUnsupported because callers need the
 // challenge returned by BeginLogin.
-func (c *Client) CompleteTwoFactor(_ context.Context, _, _ string, _ bool) error {
+func (c *Client) CompleteTwoFactor(ctx context.Context, _, _ string, _ bool) (retErr error) {
+	log, started := logRemoteStart(ctx, "complete_two_factor")
+	defer func() { logRemoteFinish(log, started, retErr) }()
 	return ErrTwoFactorUnsupported
 }
 
@@ -163,7 +214,9 @@ func toSDKProvider(provider coreauth.TwoFactorProvider) sdk.TwoFactorProvider {
 }
 
 // Lock locks the vault client, clearing in-memory key material.
-func (c *Client) Lock(_ context.Context) error {
+func (c *Client) Lock(ctx context.Context) (retErr error) {
+	log, started := logRemoteStart(ctx, "lock")
+	defer func() { logRemoteFinish(log, started, retErr) }()
 	c.sdk.Lock()
 	return nil
 }
@@ -176,13 +229,18 @@ func (c *Client) Lock(_ context.Context) error {
 // matches any real token) ensures the caller always detects a change and
 // triggers Sync. Do NOT fake a stable token here — that would suppress syncs
 // and cause stale state.
-func (c *Client) Revision(_ context.Context) (string, error) {
+func (c *Client) Revision(ctx context.Context) (revision string, retErr error) {
+	log, started := logRemoteStart(ctx, "revision")
+	defer func() { logRemoteFinish(log, started, retErr) }()
 	return "unknown", nil
 }
 
 // Sync refreshes vault state from the server and returns all items, folders,
 // and an opaque revision string.
-func (c *Client) Sync(ctx context.Context) ([]corevault.Item, []corevault.Folder, string, error) {
+func (c *Client) Sync(ctx context.Context) (items []corevault.Item, folders []corevault.Folder, revision string, retErr error) {
+	log, started := logRemoteStart(ctx, "sync")
+	defer func() { logRemoteFinishCounts(log, started, retErr, len(items), len(folders)) }()
+
 	if err := c.sdk.Sync(ctx); err != nil {
 		return nil, nil, "", err
 	}
@@ -197,7 +255,7 @@ func (c *Client) Sync(ctx context.Context) ([]corevault.Item, []corevault.Folder
 		return nil, nil, "", err
 	}
 
-	items := make([]corevault.Item, 0, len(sdkItems))
+	items = make([]corevault.Item, 0, len(sdkItems))
 	for _, si := range sdkItems {
 		ci, err := toCoreItem(si)
 		if err != nil {
@@ -206,7 +264,7 @@ func (c *Client) Sync(ctx context.Context) ([]corevault.Item, []corevault.Folder
 		items = append(items, ci)
 	}
 
-	folders := make([]corevault.Folder, len(sdkFolders))
+	folders = make([]corevault.Folder, len(sdkFolders))
 	for i, sf := range sdkFolders {
 		folders[i] = toCoreFolder(sf)
 	}
@@ -215,7 +273,10 @@ func (c *Client) Sync(ctx context.Context) ([]corevault.Item, []corevault.Folder
 }
 
 // Create creates a new vault item.
-func (c *Client) Create(ctx context.Context, item corevault.Item) (corevault.Item, error) {
+func (c *Client) Create(ctx context.Context, item corevault.Item) (result corevault.Item, retErr error) {
+	log, started := logRemoteStart(ctx, "create")
+	defer func() { logRemoteFinish(log, started, retErr) }()
+
 	created, err := c.sdk.Vault().Create(ctx, toSDKItem(item))
 	if err != nil {
 		return corevault.Item{}, err
@@ -224,7 +285,10 @@ func (c *Client) Create(ctx context.Context, item corevault.Item) (corevault.Ite
 }
 
 // Update updates an existing vault item by ID.
-func (c *Client) Update(ctx context.Context, id string, item corevault.Item) (corevault.Item, error) {
+func (c *Client) Update(ctx context.Context, id string, item corevault.Item) (result corevault.Item, retErr error) {
+	log, started := logRemoteStart(ctx, "update")
+	defer func() { logRemoteFinish(log, started, retErr) }()
+
 	updated, err := c.sdk.Vault().Update(ctx, sdk.ItemID(id), toSDKItem(item))
 	if err != nil {
 		return corevault.Item{}, err
@@ -233,12 +297,17 @@ func (c *Client) Update(ctx context.Context, id string, item corevault.Item) (co
 }
 
 // Trash soft-deletes (trashes) a vault item.
-func (c *Client) Trash(ctx context.Context, id string) error {
+func (c *Client) Trash(ctx context.Context, id string) (retErr error) {
+	log, started := logRemoteStart(ctx, "trash")
+	defer func() { logRemoteFinish(log, started, retErr) }()
 	return c.sdk.Vault().Trash(ctx, sdk.ItemID(id))
 }
 
 // Restore restores a trashed vault item.
-func (c *Client) Restore(ctx context.Context, id string) (corevault.Item, error) {
+func (c *Client) Restore(ctx context.Context, id string) (result corevault.Item, retErr error) {
+	log, started := logRemoteStart(ctx, "restore")
+	defer func() { logRemoteFinish(log, started, retErr) }()
+
 	restored, err := c.sdk.Vault().Restore(ctx, sdk.ItemID(id))
 	if err != nil {
 		return corevault.Item{}, err
@@ -247,7 +316,9 @@ func (c *Client) Restore(ctx context.Context, id string) (corevault.Item, error)
 }
 
 // Delete permanently deletes a vault item.
-func (c *Client) Delete(ctx context.Context, id string) error {
+func (c *Client) Delete(ctx context.Context, id string) (retErr error) {
+	log, started := logRemoteStart(ctx, "delete")
+	defer func() { logRemoteFinish(log, started, retErr) }()
 	return c.sdk.Vault().Delete(ctx, sdk.ItemID(id))
 }
 
@@ -255,17 +326,24 @@ func (c *Client) Delete(ctx context.Context, id string) error {
 // Item type does not expose an Attachments field. The SDK can
 // download/upload/delete individual attachments by known ID but cannot
 // enumerate them at the item level through the public API surface.
-func (c *Client) ListAttachments(_ context.Context, _ string) ([]corevault.Attachment, error) {
+func (c *Client) ListAttachments(ctx context.Context, _ string) (attachments []corevault.Attachment, retErr error) {
+	log, started := logRemoteStart(ctx, "list_attachments")
+	defer func() { logRemoteFinish(log, started, retErr) }()
 	return nil, ErrAttachmentsNotSupported
 }
 
 // DownloadAttachment downloads and decrypts an attachment to dst.
-func (c *Client) DownloadAttachment(ctx context.Context, itemID, attachmentID string, dst io.Writer) error {
+func (c *Client) DownloadAttachment(ctx context.Context, itemID, attachmentID string, dst io.Writer) (retErr error) {
+	log, started := logRemoteStart(ctx, "download_attachment")
+	defer func() { logRemoteFinish(log, started, retErr) }()
 	return c.sdk.Attachments().Download(ctx, itemID, attachmentID, dst)
 }
 
 // UploadAttachment encrypts and uploads an attachment from src.
-func (c *Client) UploadAttachment(ctx context.Context, itemID, fileName string, size int64, src io.Reader) (corevault.Attachment, error) {
+func (c *Client) UploadAttachment(ctx context.Context, itemID, fileName string, size int64, src io.Reader) (attachment corevault.Attachment, retErr error) {
+	log, started := logRemoteStart(ctx, "upload_attachment")
+	defer func() { logRemoteFinish(log, started, retErr) }()
+
 	opts := sdk.AttachmentUploadOptions{
 		ItemID:   itemID,
 		FileName: fileName,
@@ -280,12 +358,17 @@ func (c *Client) UploadAttachment(ctx context.Context, itemID, fileName string, 
 }
 
 // DeleteAttachment deletes an attachment.
-func (c *Client) DeleteAttachment(ctx context.Context, itemID, attachmentID string) error {
+func (c *Client) DeleteAttachment(ctx context.Context, itemID, attachmentID string) (retErr error) {
+	log, started := logRemoteStart(ctx, "delete_attachment")
+	defer func() { logRemoteFinish(log, started, retErr) }()
 	return c.sdk.Attachments().Delete(ctx, itemID, attachmentID)
 }
 
 // ExportSession returns the current unlocked session material and tokens.
-func (c *Client) ExportSession(ctx context.Context) (coresession.UnlockMaterial, coresession.TokenBundle, error) {
+func (c *Client) ExportSession(ctx context.Context) (materialResult coresession.UnlockMaterial, tokenResult coresession.TokenBundle, retErr error) {
+	log, started := logRemoteStart(ctx, "export_session")
+	defer func() { logRemoteFinish(log, started, retErr) }()
+
 	if c == nil || c.sdk == nil {
 		return coresession.UnlockMaterial{}, coresession.TokenBundle{}, errors.New("bitwarden adapter: client or SDK is nil")
 	}
@@ -315,7 +398,10 @@ func (c *Client) ExportSession(ctx context.Context) (coresession.UnlockMaterial,
 }
 
 // RestoreSession imports session material and tokens, unlocking the client.
-func (c *Client) RestoreSession(ctx context.Context, material coresession.UnlockMaterial, tokens coresession.TokenBundle) error {
+func (c *Client) RestoreSession(ctx context.Context, material coresession.UnlockMaterial, tokens coresession.TokenBundle) (retErr error) {
+	log, started := logRemoteStart(ctx, "restore_session")
+	defer func() { logRemoteFinish(log, started, retErr) }()
+
 	if c == nil || c.sdk == nil {
 		return errors.New("bitwarden adapter: client or SDK is nil")
 	}
@@ -414,7 +500,10 @@ func (s *refreshTokenStore) DeleteTokens(_ context.Context, accountID string) er
 // identity, seeds the token store with the supplied bundle, calls refresh,
 // and returns the updated TokenBundle with original Email and ServerURL metadata
 // preserved.
-func (c *Client) RefreshTokenBundle(ctx context.Context, tokens coresession.TokenBundle) (coresession.TokenBundle, error) {
+func (c *Client) RefreshTokenBundle(ctx context.Context, tokens coresession.TokenBundle) (bundle coresession.TokenBundle, retErr error) {
+	log, started := logRemoteStart(ctx, "refresh_token_bundle")
+	defer func() { logRemoteFinish(log, started, retErr) }()
+
 	if c == nil || c.sdk == nil {
 		return coresession.TokenBundle{}, errors.New("bitwarden adapter: client or SDK is nil")
 	}
