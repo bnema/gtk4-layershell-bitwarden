@@ -1,6 +1,9 @@
 package omnibox
 
-import "github.com/bnema/gtk4-layershell-bitwarden/internal/ports/in"
+import (
+	coreerrors "github.com/bnema/gtk4-layershell-bitwarden/internal/core/errors"
+	"github.com/bnema/gtk4-layershell-bitwarden/internal/ports/in"
+)
 
 // Status represents the sync/status bar state.
 type Status struct {
@@ -20,9 +23,9 @@ func StatusFromEvent(evt in.Event) Status {
 	case in.SyncUpdated:
 		return Status{Text: "Vault updated", Syncing: false}
 	case in.SyncFailed:
-		msg := evt.Message
-		if msg == "" {
-			msg = "Sync failed"
+		msg := coreerrors.ShortErrorText(evt.Message)
+		if msg == coreerrors.ShortGenericError {
+			msg = coreerrors.ShortSyncFailed
 		}
 		return Status{Text: msg, Syncing: false, Error: msg}
 	case in.MutationPending:

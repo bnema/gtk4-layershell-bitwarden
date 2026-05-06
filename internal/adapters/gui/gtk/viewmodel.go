@@ -4,6 +4,7 @@ import (
 	"strings"
 
 	"github.com/bnema/gtk4-layershell-bitwarden/internal/adapters/gui/display"
+	coreerrors "github.com/bnema/gtk4-layershell-bitwarden/internal/core/errors"
 	corevault "github.com/bnema/gtk4-layershell-bitwarden/internal/core/vault"
 	"github.com/bnema/gtk4-layershell-bitwarden/internal/ports/in"
 )
@@ -157,9 +158,9 @@ func StatusFromEvent(evt in.Event) StatusViewModel {
 	case in.SyncUpdated:
 		return StatusViewModel{Text: "Vault updated", Syncing: false}
 	case in.SyncFailed:
-		msg := evt.Message
-		if msg == "" {
-			msg = "Sync failed"
+		msg := coreerrors.ShortErrorText(evt.Message)
+		if msg == coreerrors.ShortGenericError {
+			msg = coreerrors.ShortSyncFailed
 		}
 		return StatusViewModel{Text: msg, Syncing: false, Error: msg}
 	case in.MutationPending:

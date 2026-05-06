@@ -24,9 +24,17 @@ func TestStatusFromEvent_SyncUpdated(t *testing.T) {
 func TestStatusFromEvent_SyncFailed(t *testing.T) {
 	evt := in.Event{Kind: in.SyncFailed, Message: "network error"}
 	st := StatusFromEvent(evt)
-	require.Equal(t, "network error", st.Text)
+	require.Equal(t, "Network unavailable", st.Text)
 	require.False(t, st.Syncing)
-	require.Equal(t, "network error", st.Error)
+	require.Equal(t, "Network unavailable", st.Error)
+}
+
+func TestStatusFromEvent_SyncFailed_RawBackendRegression(t *testing.T) {
+	evt := in.Event{Kind: in.SyncFailed, Message: "remote sync failed: bitwarden: decryption failed op=crypto.DecryptCipher code=decryption_failed message=failed to decrypt cipher field"}
+	st := StatusFromEvent(evt)
+	require.Equal(t, "Vault could not be decrypted", st.Text)
+	require.False(t, st.Syncing)
+	require.Equal(t, "Vault could not be decrypted", st.Error)
 }
 
 func TestStatusFromEvent_SyncFailed_EmptyMessage(t *testing.T) {

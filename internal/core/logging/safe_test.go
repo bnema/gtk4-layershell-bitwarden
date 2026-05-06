@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+
+	coreerrors "github.com/bnema/gtk4-layershell-bitwarden/internal/core/errors"
 )
 
 func TestShouldRedactKeySensitiveWords(t *testing.T) {
@@ -111,6 +113,7 @@ func TestSafeErrorKind(t *testing.T) {
 		{name: "wrapped canceled", err: fmt.Errorf("operation failed: %w", context.Canceled), want: "canceled"},
 		{name: "deadline exceeded", err: context.DeadlineExceeded, want: "deadline_exceeded"},
 		{name: "wrapped deadline exceeded", err: fmt.Errorf("operation failed: %w", context.DeadlineExceeded), want: "deadline_exceeded"},
+		{name: "typed crypto", err: &coreerrors.Error{Kind: coreerrors.KindCrypto, Message: "decrypt failed"}, want: "crypto"},
 		{name: "other", err: errors.New("password=hunter2"), want: "error"},
 	}
 

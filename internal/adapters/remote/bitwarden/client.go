@@ -118,6 +118,71 @@ func logRemoteFinishCounts(log zerowrap.Logger, started time.Time, err error, it
 		Msg(msg)
 }
 
+func classifySDKError(operation string, err error) error {
+	if err == nil {
+		return nil
+	}
+
+	var kind coreerrors.Kind
+	var code, message string
+	switch {
+	case errors.Is(err, sdk.ErrDecryptionFailed):
+		kind = coreerrors.KindCrypto
+		code = "decryption_failed"
+		message = "vault decryption failed"
+	case errors.Is(err, sdk.ErrUnauthorized):
+		kind = coreerrors.KindUnauthenticated
+		code = "unauthorized"
+		message = "authentication required"
+	case errors.Is(err, sdk.ErrTwoFactorRequired):
+		kind = coreerrors.KindUnauthenticated
+		code = "two_factor_required"
+		message = "two-factor authentication required"
+	case errors.Is(err, sdk.ErrRateLimited):
+		kind = coreerrors.KindTemporary
+		code = "rate_limited"
+		message = "service rate limited"
+	case errors.Is(err, sdk.ErrorKindPermissionDenied):
+		kind = coreerrors.KindUnauthenticated
+		code = "permission_denied"
+		message = "permission denied"
+	case errors.Is(err, sdk.ErrorKindConflict):
+		kind = coreerrors.KindConflict
+		code = "conflict"
+		message = "vault conflict"
+	case errors.Is(err, sdk.ErrorKindNetwork):
+		kind = coreerrors.KindNetwork
+		code = "network"
+		message = "network unavailable"
+	case errors.Is(err, sdk.ErrorKindTemporary), errors.Is(err, sdk.ErrorKindUnavailable):
+		kind = coreerrors.KindTemporary
+		code = "temporary"
+		message = "temporary service issue"
+	case errors.Is(err, sdk.ErrLocked):
+		kind = coreerrors.KindLocked
+		code = "locked"
+		message = "vault is locked"
+	case errors.Is(err, sdk.ErrNotFound):
+		kind = coreerrors.KindNotFound
+		code = "not_found"
+		message = "vault item not found"
+	case errors.Is(err, sdk.ErrUnsupported):
+		kind = coreerrors.KindUnsupported
+		code = "unsupported"
+		message = "unsupported vault data"
+	default:
+		return err
+	}
+
+	return &coreerrors.Error{
+		Kind:    kind,
+		Op:      "remote.bitwarden." + operation,
+		Code:    code,
+		Message: message,
+		Cause:   err,
+	}
+}
+
 // Login authenticates with master password.
 func (c *Client) Login(ctx context.Context, email, password string) (retErr error) {
 	log, started := logRemoteStart(ctx, "login")
@@ -243,24 +308,24 @@ func (c *Client) Sync(ctx context.Context) (items []corevault.Item, folders []co
 	defer func() { logRemoteFinishCounts(log, started, retErr, len(items), len(folders)) }()
 
 	if err := c.sdk.Sync(ctx); err != nil {
-		return nil, nil, "", err
+		return nil, nil, "", classifySDKError("sync", err)
 	}
 
 	sdkItems, err := c.sdk.Vault().List(ctx)
 	if err != nil {
-		return nil, nil, "", err
+		return nil, nil, "", classifySDKError("list_items", err)
 	}
 
 	sdkFolders, err := c.sdk.Folders().List(ctx)
 	if err != nil {
-		return nil, nil, "", err
+		return nil, nil, "", classifySDKError("list_folders", err)
 	}
 
 	items = make([]corevault.Item, 0, len(sdkItems))
 	for _, si := range sdkItems {
 		ci, err := toCoreItem(si)
 		if err != nil {
-			return nil, nil, "", err
+			return nil, nil, "", classifySDKError("map_item", err)
 		}
 		items = append(items, ci)
 	}

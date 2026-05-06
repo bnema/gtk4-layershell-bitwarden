@@ -70,7 +70,9 @@ func logAppServiceFinish(log zerowrap.Logger, started time.Time, err error) {
 	event := log.Info()
 	msg := "app service operation finished"
 	if err != nil {
-		event = log.Error().Str("error_kind", safelog.SafeErrorKind(err))
+		event = log.Error().
+			Str("error_kind", safelog.SafeErrorKind(err)).
+			Str("error_detail", safelog.SafeErrorDetail(err))
 		msg = "app service operation failed"
 	}
 	event.Int64(zerowrap.FieldDuration, time.Since(started).Milliseconds()).Msg(msg)
@@ -80,7 +82,9 @@ func logAppServiceFinishCount(log zerowrap.Logger, started time.Time, err error,
 	event := log.Info()
 	msg := "app service operation finished"
 	if err != nil {
-		event = log.Error().Str("error_kind", safelog.SafeErrorKind(err))
+		event = log.Error().
+			Str("error_kind", safelog.SafeErrorKind(err)).
+			Str("error_detail", safelog.SafeErrorDetail(err))
 		msg = "app service operation failed"
 	}
 	event.
@@ -2340,7 +2344,7 @@ func (s *Service) syncOnce(ctx context.Context) {
 	rev, err := s.deps.Remote.Revision(ctx)
 	if err != nil {
 		opErr = err
-		s.emit(SyncFailed, fmt.Sprintf("revision check failed: %v", err))
+		s.emit(SyncFailed, cerrors.ShortMessage(err))
 		return
 	}
 
@@ -2360,7 +2364,7 @@ func (s *Service) syncOnce(ctx context.Context) {
 	remoteItems, remoteFolders, remoteRev, err := s.deps.Remote.Sync(ctx)
 	if err != nil {
 		opErr = err
-		s.emit(SyncFailed, fmt.Sprintf("remote sync failed: %v", err))
+		s.emit(SyncFailed, cerrors.ShortMessage(err))
 		return
 	}
 	count = len(remoteItems) + len(remoteFolders) + len(outboxSnapshot)
@@ -2419,7 +2423,7 @@ func (s *Service) syncOnce(ctx context.Context) {
 	if len(outboxSnapshot) > 0 {
 		if err := s.replayOutbox(ctx, outboxSnapshot); err != nil {
 			opErr = err
-			s.emit(SyncFailed, fmt.Sprintf("outbox replay failed: %v", err))
+			s.emit(SyncFailed, cerrors.ShortMessage(err))
 			// Do NOT clear outbox or install remote state on replay failure.
 			return
 		}
@@ -2428,7 +2432,7 @@ func (s *Service) syncOnce(ctx context.Context) {
 		remoteItems, remoteFolders, remoteRev, err = s.deps.Remote.Sync(ctx)
 		if err != nil {
 			opErr = err
-			s.emit(SyncFailed, fmt.Sprintf("post-replay sync failed: %v", err))
+			s.emit(SyncFailed, cerrors.ShortMessage(err))
 			// Keep outbox intact.
 			return
 		}

@@ -7,6 +7,8 @@ import (
 	"regexp"
 	"strings"
 	"unicode"
+
+	coreerrors "github.com/bnema/gtk4-layershell-bitwarden/internal/core/errors"
 )
 
 const redactedValue = "[REDACTED]"
@@ -100,9 +102,14 @@ func SafeErrorKind(err error) string {
 		return "canceled"
 	case errors.Is(err, context.DeadlineExceeded):
 		return "deadline_exceeded"
-	default:
-		return "error"
 	}
+
+	var appErr *coreerrors.Error
+	if errors.As(err, &appErr) && appErr.Kind != "" {
+		return string(appErr.Kind)
+	}
+
+	return "error"
 }
 
 func containsSeparatedWord(key, word string) bool {
