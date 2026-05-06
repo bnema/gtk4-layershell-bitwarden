@@ -215,7 +215,7 @@ func TestModeForAuthStatusDetail_Unauthenticated(t *testing.T) {
 	require.Equal(t, ModeUnlock, mode)
 }
 
-func TestModeForAuthStatusDetail_LoggedInLockedProfileExistsEnvelopeExpired(t *testing.T) {
+func TestModeForAuthStatusDetail_LegacyExpiredEnvelopeUsesPINUnlock(t *testing.T) {
 	detail := session.AuthStatusDetail{
 		Status:        session.LoggedInLocked,
 		Reason:        session.AuthReasonEnvelopeExpired,
@@ -224,7 +224,7 @@ func TestModeForAuthStatusDetail_LoggedInLockedProfileExistsEnvelopeExpired(t *t
 		EnvelopeValid: false,
 	}
 	mode := ModeForAuthStatusDetail(detail, true)
-	require.Equal(t, ModePINRenew, mode, "profile exists, envelope expired → renew")
+	require.Equal(t, ModePINUnlock, mode, "legacy expired envelope should remain PIN-only within same session")
 }
 
 func TestBack_UnlockModesNoOp(t *testing.T) {

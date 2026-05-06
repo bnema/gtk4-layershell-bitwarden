@@ -107,19 +107,20 @@ sent to Bitwarden. Secret Service is mandatory on Linux; if unavailable, auth
 commands fail with a `keyring_unavailable` error.
 
 The local PIN is configured once per Bitwarden account/server. A soft lock clears
-decrypted vault state from the running process but keeps the quick-unlock
-envelope. If the envelope is still valid, reopening the overlay or running
+decrypted vault state from the running process but keeps the boot-bound
+quick-unlock envelope. After the master password and 2FA have unlocked Bitwarden
+once for the current Linux boot/session, reopening the overlay or running
 `unlock` asks only for the local PIN.
 
 A hard lock deletes the quick-unlock envelope but keeps the token bundle and PIN
-profile. After hard lock, reboot, Linux logout/login, envelope expiry, or too
+profile. After hard lock, reboot, Linux logout/login/keyring teardown, or too
 many failed PIN attempts, the next recovery uses the Bitwarden master password
 only to recreate quick unlock. You do not enter or choose a PIN again unless you
 are doing PIN-only soft unlock, explicitly resetting it, or logging in from a
 full logout/setup state.
 
-`unlock` uses the configured email/region and prompts for the local PIN only when
-a valid quick-unlock envelope is available. If the envelope is missing or
+`unlock` uses the configured email/region and prompts for the local PIN when a
+boot-bound quick-unlock envelope is available. If the envelope is missing or
 invalid, use the GTK overlay renewal flow or run `login` again with the Bitwarden
 master password to recreate quick unlock.
 

@@ -9,7 +9,7 @@ import (
 // Validate tests
 // ---------------------------------------------------------------------------
 
-func TestUnlockEnvelopeValidatesEmailServerBootAndExpiry(t *testing.T) {
+func TestUnlockEnvelopeValidatesEmailServerBootAndIgnoresLegacyExpiry(t *testing.T) {
 	now := time.Date(2025, 1, 15, 12, 0, 0, 0, time.UTC)
 	ref := AccountRef{Email: "a@b.com", ServerURL: "https://vault.example.com"}
 	bootID := "boot-abc-123"
@@ -33,10 +33,10 @@ func TestUnlockEnvelopeValidatesEmailServerBootAndExpiry(t *testing.T) {
 		}
 	})
 
-	t.Run("expired", func(t *testing.T) {
+	t.Run("legacy expired envelope remains valid in same boot", func(t *testing.T) {
 		late := now.Add(2 * time.Hour)
-		if err := envelope.Validate(ref, bootID, late); err != ErrUnlockExpired {
-			t.Fatalf("expected ErrUnlockExpired, got %v", err)
+		if err := envelope.Validate(ref, bootID, late); err != nil {
+			t.Fatalf("expected nil for legacy expired envelope in same boot, got %v", err)
 		}
 	})
 

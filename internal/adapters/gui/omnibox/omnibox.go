@@ -179,6 +179,9 @@ func ModeForAuthStatusDetail(detail session.AuthStatusDetail, hasEmail bool) Mod
 		}
 		return ModeUnlock
 	case session.LoggedInLocked:
+		if detail.HasPINProfile && detail.HasEnvelope && detail.Reason == session.AuthReasonEnvelopeExpired {
+			return ModePINUnlock
+		}
 		if detail.HasPINProfile {
 			return ModePINRenew
 		}

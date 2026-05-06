@@ -29,9 +29,9 @@ type ServiceConfig struct {
 }
 
 const (
-	defaultTTL         = 30 * time.Minute
-	defaultMaxFailures = 5
-	defaultKDFTime     = 3
+	defaultTTL         time.Duration = 0
+	defaultMaxFailures int           = 5
+	defaultKDFTime     uint32        = 3
 	// Argon2id memory is expressed in KiB; 64*1024 means 64 MiB.
 	defaultKDFMemory  = 64 * 1024
 	defaultKDFThreads = 1
@@ -47,7 +47,7 @@ type Service struct {
 // New returns a Service with defaults applied for any zero-valued fields in
 // the supplied configuration.
 func New(cfg ServiceConfig) Service {
-	if cfg.TTL <= 0 {
+	if cfg.TTL < 0 {
 		cfg.TTL = defaultTTL
 	}
 	if cfg.MaxFailures <= 0 {
@@ -140,12 +140,15 @@ func (s Service) Create(
 	copy(stored[:len(nonce)], nonce)
 	copy(stored[len(nonce):], ciphertext)
 
-	now := time.Now().UTC()
+	var expiresAt time.Time
+	if s.cfg.TTL > 0 {
+		expiresAt = time.Now().UTC().Add(s.cfg.TTL)
+	}
 	return session.UnlockEnvelope{
 		Version:        session.UnlockEnvelopeVersion,
 		Account:        ref,
 		BootID:         bootID,
-		ExpiresAt:      now.Add(s.cfg.TTL),
+		ExpiresAt:      expiresAt,
 		KDF:            "argon2id",
 		KDFTime:        s.cfg.KDFTime,
 		KDFMemory:      s.cfg.KDFMemory,
@@ -180,7 +183,7 @@ func (s Service) Open(
 		return session.UnlockMaterial{}, updated, err
 	}
 
-	// Validate expiry, boot, account and backoff.
+	// Validate boot, account and backoff.
 	if err := updated.Validate(ref, bootID, now); err != nil {
 		// Do not increment failure counters for these errors.
 		return session.UnlockMaterial{}, updated, err

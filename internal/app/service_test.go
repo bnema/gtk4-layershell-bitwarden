@@ -1672,7 +1672,7 @@ func TestAuthStatusUsesKeyringAndEnvelope(t *testing.T) {
 		require.Equal(t, session.LoggedInLocked, status)
 	})
 
-	t.Run("envelope expired => logged_in_locked", func(t *testing.T) {
+	t.Run("legacy envelope expiry is ignored in same boot", func(t *testing.T) {
 		expiredEnv := validEnvelope.Clone()
 		expiredEnv.ExpiresAt = time.Now().Add(-time.Hour)
 		cs := &fakeCredentialStore{
@@ -1688,7 +1688,7 @@ func TestAuthStatusUsesKeyringAndEnvelope(t *testing.T) {
 
 		status, err := svc.AuthStatus(context.Background(), email)
 		require.NoError(t, err)
-		require.Equal(t, session.LoggedInLocked, status)
+		require.Equal(t, session.LoggedInUnlockAvailable, status)
 	})
 
 	t.Run("bootID changed => logged_in_locked", func(t *testing.T) {
@@ -2022,7 +2022,7 @@ func TestAuthStatusDetailPINProfileLoadErrorReturnsStatus(t *testing.T) {
 	require.Equal(t, session.AuthReasonKeyringUnavailable, detail.Reason)
 }
 
-func TestAuthStatusDetailEnvelopeExpired(t *testing.T) {
+func TestAuthStatusDetailLegacyExpiredEnvelopeStillSoftUnlockAvailable(t *testing.T) {
 	email := "user@example.com"
 	ref := session.AccountRef{Email: email, ServerURL: "https://vault.bitwarden.com"}
 
@@ -2062,13 +2062,13 @@ func TestAuthStatusDetailEnvelopeExpired(t *testing.T) {
 
 	detail, err := svc.AuthStatusDetail(context.Background(), email)
 	require.NoError(t, err)
-	require.Equal(t, session.LoggedInLocked, detail.Status)
-	require.Equal(t, session.AuthReasonEnvelopeExpired, detail.Reason)
+	require.Equal(t, session.LoggedInUnlockAvailable, detail.Status)
+	require.Equal(t, session.AuthReasonSoftUnlockAvailable, detail.Reason)
 	require.True(t, detail.HasToken)
 	require.True(t, detail.HasPINProfile)
 	require.True(t, detail.HasEnvelope)
-	require.False(t, detail.EnvelopeValid)
-	require.False(t, detail.SoftUnlockAvailable)
+	require.True(t, detail.EnvelopeValid)
+	require.True(t, detail.SoftUnlockAvailable)
 }
 
 func TestAuthStatusDetailEnvelopeBootChanged(t *testing.T) {

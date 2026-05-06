@@ -205,8 +205,11 @@ func runUnlock(cmd *cobra.Command, opts Options, cachePath, outboxPath string, a
 	}
 
 	// Fail-fast for any state where PIN unlock cannot succeed, before
-	// consuming stdin.
-	if !detail.SoftUnlockAvailable {
+	// consuming stdin. Legacy expired envelopes remain PIN-unlockable within the
+	// same boot/session; current AuthStatusDetail no longer emits that state, but
+	// tolerate it for older callers/tests.
+	legacyExpiredEnvelope := detail.Reason == session.AuthReasonEnvelopeExpired && detail.HasPINProfile && detail.HasEnvelope
+	if !detail.SoftUnlockAvailable && !legacyExpiredEnvelope {
 		msg := detailLockedMessage(detail)
 		return fmt.Errorf("%s", msg)
 	}

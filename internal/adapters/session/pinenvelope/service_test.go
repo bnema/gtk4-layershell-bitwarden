@@ -158,7 +158,27 @@ func TestOpenEnvelopeDeletesAfterMaxFailures(t *testing.T) {
 	}
 }
 
-func TestOpenEnvelopeRejectsExpiredOrBootChanged(t *testing.T) {
+func TestOpenEnvelopeAllowsLegacyExpiredEnvelopeInSameBoot(t *testing.T) {
+	svc := New(testConfig())
+	ctx := context.Background()
+
+	env, err := svc.Create(ctx, testRef, testMaterial(), testPIN, testBootID)
+	if err != nil {
+		t.Fatalf("Create failed: %v", err)
+	}
+	env.ExpiresAt = time.Now().UTC().Add(-1 * time.Hour)
+
+	material, updated, err := svc.Open(ctx, testRef, env, testPIN, testBootID)
+	if err != nil {
+		t.Fatalf("expected legacy expired envelope to open in same boot, got %v", err)
+	}
+	defer material.Close()
+	if updated.FailedAttempts != 0 {
+		t.Fatalf("expected FailedAttempts 0 after successful unlock, got %d", updated.FailedAttempts)
+	}
+}
+
+func TestOpenEnvelopeRejectsBootChanged(t *testing.T) {
 	svc := New(testConfig())
 	ctx := context.Background()
 
@@ -167,30 +187,14 @@ func TestOpenEnvelopeRejectsExpiredOrBootChanged(t *testing.T) {
 		t.Fatalf("Create failed: %v", err)
 	}
 
-	t.Run("expired envelope returns ErrUnlockExpired", func(t *testing.T) {
-		expired := env
-		expired.ExpiresAt = time.Now().UTC().Add(-1 * time.Hour)
-
-		_, updated, err := svc.Open(ctx, testRef, expired, testPIN, testBootID)
-		if err != session.ErrUnlockExpired {
-			t.Fatalf("expected ErrUnlockExpired, got %v", err)
-		}
-		// Expiry should not increment failure counter.
-		if updated.FailedAttempts != 0 {
-			t.Fatalf("expected FailedAttempts 0 after expiry, got %d", updated.FailedAttempts)
-		}
-	})
-
-	t.Run("wrong boot returns ErrBootChanged", func(t *testing.T) {
-		_, updated, err := svc.Open(ctx, testRef, env, testPIN, "different-boot")
-		if err != session.ErrBootChanged {
-			t.Fatalf("expected ErrBootChanged, got %v", err)
-		}
-		// Boot change should not increment failure counter.
-		if updated.FailedAttempts != 0 {
-			t.Fatalf("expected FailedAttempts 0 after boot change, got %d", updated.FailedAttempts)
-		}
-	})
+	_, updated, err := svc.Open(ctx, testRef, env, testPIN, "different-boot")
+	if err != session.ErrBootChanged {
+		t.Fatalf("expected ErrBootChanged, got %v", err)
+	}
+	// Boot change should not increment failure counter.
+	if updated.FailedAttempts != 0 {
+		t.Fatalf("expected FailedAttempts 0 after boot change, got %d", updated.FailedAttempts)
+	}
 }
 
 func TestCreateCancelledContext(t *testing.T) {
@@ -222,26 +226,17 @@ func TestOpenCancelledContext(t *testing.T) {
 	}
 }
 
-func TestDefaultTTLIs30Minutes(t *testing.T) {
+func TestDefaultTTLDoesNotExpireWithinBootSession(t *testing.T) {
 	svc := New(ServiceConfig{})
 	ctx := context.Background()
 
-	before := time.Now().UTC()
 	env, err := svc.Create(ctx, testRef, testMaterial(), testPIN, testBootID)
 	if err != nil {
 		t.Fatalf("Create failed: %v", err)
 	}
-	after := time.Now().UTC()
 
-	// ExpiresAt should be roughly now+30m. Use a broad window to avoid flakes.
-	// The minimum expected is now+30m (minus a small epsilon for timing).
-	// The maximum is (just-after-Create)+30m or so.
-	wantMin := before.Add(20 * time.Minute)
-	wantMax := after.Add(40 * time.Minute)
-
-	if env.ExpiresAt.Before(wantMin) || env.ExpiresAt.After(wantMax) {
-		t.Fatalf("ExpiresAt %v outside expected window [%v, %v] (implied default TTL of 30m)",
-			env.ExpiresAt, wantMin, wantMax)
+	if !env.ExpiresAt.IsZero() {
+		t.Fatalf("default envelope ExpiresAt = %v, want zero for session-long PIN unlock", env.ExpiresAt)
 	}
 }
 

@@ -598,9 +598,9 @@ func TestUnlockDoesNotConsumePINWhenLoggedInLocked(t *testing.T) {
 	require.Empty(t, fake.pin, "PIN should not be consumed when logged-in-locked")
 }
 
-// TestUnlockFailsWhenEnvelopeExpired verifies that unlock fails fast
-// with guidance when the envelope is expired.
-func TestUnlockFailsWhenEnvelopeExpired(t *testing.T) {
+// TestUnlockAllowsLegacyExpiredEnvelope verifies that legacy expired envelope
+// status still allows PIN-only unlock in the same boot/session.
+func TestUnlockAllowsLegacyExpiredEnvelope(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.toml")
 	fake := newFakeAuthService()
@@ -622,7 +622,6 @@ func TestUnlockFailsWhenEnvelopeExpired(t *testing.T) {
 	_, err := executeCmd(t, opts, []string{"config", "set", "bitwarden.email", "me@example.com"})
 	require.NoError(t, err)
 
-	// Provide PIN via stdin — it should NOT be consumed.
 	stdin := strings.NewReader("9999\n")
 	root := NewRootCommand(opts)
 	root.SetArgs([]string{"unlock", "--raw", "--no-sync"})
@@ -632,11 +631,8 @@ func TestUnlockFailsWhenEnvelopeExpired(t *testing.T) {
 	root.SetErr(new(bytes.Buffer))
 
 	err = root.ExecuteContext(context.Background())
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "envelope expired")
-
-	// Verify PIN was NOT consumed.
-	require.Empty(t, fake.pin, "PIN should not be consumed when envelope is expired")
+	require.NoError(t, err)
+	require.Equal(t, "9999", fake.pin, "PIN should be consumed for legacy expired envelope unlock")
 }
 
 // TestUnlockFailsWhenBootChanged verifies that unlock fails fast

@@ -16,16 +16,15 @@ var (
 
 // Validate checks the envelope against the supplied account reference, boot ID,
 // and current time. It returns an appropriate sentinel error when a check fails,
-// or nil when all checks pass.
+// or nil when all checks pass. ExpiresAt is retained for legacy envelopes but is
+// intentionally ignored: hard lock is represented by deleting the envelope,
+// while same-session soft unlock remains PIN-only until reboot/session teardown.
 func (e UnlockEnvelope) Validate(ref AccountRef, bootID string, now time.Time) error {
 	if e.Account != ref {
 		return ErrAccountMismatch
 	}
 	if e.BootID != bootID {
 		return ErrBootChanged
-	}
-	if !e.ExpiresAt.IsZero() && !now.Before(e.ExpiresAt) {
-		return ErrUnlockExpired
 	}
 	if !e.BackoffUntil.IsZero() && now.Before(e.BackoffUntil) {
 		return ErrPINBackoff

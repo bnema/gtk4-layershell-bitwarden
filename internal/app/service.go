@@ -1683,8 +1683,6 @@ func (s *Service) AuthStatusDetail(ctx context.Context, email string) (detail se
 		switch {
 		case errors.Is(err, session.ErrBootChanged):
 			detail.Reason = session.AuthReasonBootChanged
-		case errors.Is(err, session.ErrUnlockExpired):
-			detail.Reason = session.AuthReasonEnvelopeExpired
 		case errors.Is(err, session.ErrPINBackoff):
 			detail.Reason = session.AuthReasonPINBackoff
 		case errors.Is(err, session.ErrAccountMismatch):
