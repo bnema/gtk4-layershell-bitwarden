@@ -52,6 +52,30 @@ func newCacheSalt() ([]byte, error) {
 	return salt, nil
 }
 
+func appServiceLog(ctx context.Context, operation string) zerowrap.Logger {
+	return zerowrap.Logger{Logger: zerowrap.FromCtx(ctx).
+		With().
+		Str(zerowrap.FieldComponent, "app.service").
+		Str(zerowrap.FieldOperation, operation).
+		Logger()}
+}
+
+func logAppServiceStart(ctx context.Context, operation string) (zerowrap.Logger, time.Time) {
+	log := appServiceLog(ctx, operation)
+	log.Info().Msg("app service operation started")
+	return log, time.Now()
+}
+
+func logAppServiceFinish(log zerowrap.Logger, started time.Time, err error) {
+	event := log.Info()
+	msg := "app service operation finished"
+	if err != nil {
+		event = log.Error().Str("error_kind", safelog.SafeErrorKind(err))
+		msg = "app service operation failed"
+	}
+	event.Int64(zerowrap.FieldDuration, time.Since(started).Milliseconds()).Msg(msg)
+}
+
 // NewService creates a new Service with the given dependencies.
 func NewService(deps Deps) *Service {
 	cfg := deps.Config
@@ -85,6 +109,9 @@ func (s *Service) emit(kind EventKind, message string) {
 // keyring. It performs remote login exactly once and requires a non-empty
 // PIN before any remote call.
 func (s *Service) Login(ctx context.Context, input auth.LoginInput) (retErr error) {
+	log, started := logAppServiceStart(ctx, "login")
+	defer func() { logAppServiceFinish(log, started, retErr) }()
+
 	// 1. Validate credentials availability and dependencies before remote login.
 	if err := s.checkCredentialsAvailable(ctx); err != nil {
 		return fmt.Errorf("app: credentials: %w", err)
@@ -202,6 +229,9 @@ func (s *Service) Login(ctx context.Context, input auth.LoginInput) (retErr erro
 
 // Unlock transitions the service from locked to unlocked.
 func (s *Service) Unlock(ctx context.Context, email, password string) (retErr error) {
+	log, started := logAppServiceStart(ctx, "unlock")
+	defer func() { logAppServiceFinish(log, started, retErr) }()
+
 	return s.unlock(ctx, email, password, nil)
 }
 
@@ -219,6 +249,9 @@ func (s *Service) UnlockWithTwoFactor(ctx context.Context, email, password strin
 // success. On PIN mismatch, failure counters are persisted; after max failures
 // the envelope is deleted.
 func (s *Service) UnlockWithPIN(ctx context.Context, email, pin string) (retErr error) {
+	log, started := logAppServiceStart(ctx, "unlock_pin")
+	defer func() { logAppServiceFinish(log, started, retErr) }()
+
 	// 1. Validate dependencies.
 	if err := s.checkCredentialsAvailable(ctx); err != nil {
 		return fmt.Errorf("app: unlock-pin: credentials: %w", err)
@@ -439,6 +472,9 @@ func (s *Service) UnlockWithPIN(ctx context.Context, email, pin string) (retErr 
 // new PIN is required to create a profile and envelope.
 // On any persistence failure, partial credentials are cleaned up.
 func (s *Service) RenewUnlockEnvelope(ctx context.Context, input auth.RenewEnvelopeInput) (retErr error) {
+	log, started := logAppServiceStart(ctx, "renew_unlock_envelope")
+	defer func() { logAppServiceFinish(log, started, retErr) }()
+
 	// 1. Validate dependencies and credentials availability.
 	if err := s.checkCredentialsAvailable(ctx); err != nil {
 		return fmt.Errorf("app: renew-envelope: credentials: %w", err)
@@ -616,6 +652,9 @@ func (s *Service) RenewUnlockEnvelope(ctx context.Context, input auth.RenewEnvel
 // without requiring a CLI login. Returns an error if PIN envelope
 // dependencies are unavailable.
 func (s *Service) UnlockAndCreateEnvelope(ctx context.Context, email, password, pin string, prompt auth.TwoFactorPrompt) (retErr error) {
+	log, started := logAppServiceStart(ctx, "unlock_create_envelope")
+	defer func() { logAppServiceFinish(log, started, retErr) }()
+
 	if s.deps.PINEnvelope == nil {
 		return fmt.Errorf("app: unlock-enroll: %w", cerrors.ErrUnsupported)
 	}
@@ -980,7 +1019,10 @@ func (s *Service) loadCachedVaultWithKey(ctx context.Context, key []byte) ([]vau
 
 // Lock transitions the service from unlocked to locked. It is a compatibility
 // wrapper around SoftLock.
-func (s *Service) Lock(ctx context.Context) error {
+func (s *Service) Lock(ctx context.Context) (retErr error) {
+	log, started := logAppServiceStart(ctx, "lock")
+	defer func() { logAppServiceFinish(log, started, retErr) }()
+
 	return s.SoftLock(ctx)
 }
 
@@ -988,7 +1030,10 @@ func (s *Service) Lock(ctx context.Context) error {
 // outbox, conflicts) and cancels background workers without deleting token
 // bundle, PIN profile, unlock envelope, encrypted cache, or outbox from
 // persistent storage.
-func (s *Service) SoftLock(ctx context.Context) error {
+func (s *Service) SoftLock(ctx context.Context) (retErr error) {
+	log, started := logAppServiceStart(ctx, "soft_lock")
+	defer func() { logAppServiceFinish(log, started, retErr) }()
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -1031,7 +1076,10 @@ func (s *Service) SoftLock(ctx context.Context) error {
 // HardLock performs a soft lock and deletes the unlock envelope for the given
 // email. The token bundle and PIN profile are preserved, allowing the user to
 // renew the envelope with their master password via RenewUnlockEnvelope.
-func (s *Service) HardLock(ctx context.Context, email string) error {
+func (s *Service) HardLock(ctx context.Context, email string) (retErr error) {
+	log, started := logAppServiceStart(ctx, "hard_lock")
+	defer func() { logAppServiceFinish(log, started, retErr) }()
+
 	if err := s.SoftLock(ctx); err != nil {
 		return err
 	}
@@ -1495,8 +1543,29 @@ func (s *Service) AuthStatus(ctx context.Context, email string) (session.AuthSta
 // AuthStatusDetail returns detailed authentication state for the given email,
 // including the status, reason, and presence/validity of token, PIN profile,
 // and unlock envelope.
-func (s *Service) AuthStatusDetail(ctx context.Context, email string) (session.AuthStatusDetail, error) {
-	detail := session.AuthStatusDetail{}
+func (s *Service) AuthStatusDetail(ctx context.Context, email string) (detail session.AuthStatusDetail, retErr error) {
+	log, started := logAppServiceStart(ctx, "auth_status_detail")
+	var envelopeExpired bool
+	var bootMatches bool
+	defer func() {
+		event := log.Info()
+		msg := "app service operation finished"
+		if retErr != nil {
+			event = log.Error().Str("error_kind", safelog.SafeErrorKind(retErr))
+			msg = "app service operation failed"
+		}
+		event.
+			Int64(zerowrap.FieldDuration, time.Since(started).Milliseconds()).
+			Str("status", string(detail.Status)).
+			Bool("has_token_bundle", detail.HasToken).
+			Bool("has_pin_profile", detail.HasPINProfile).
+			Bool("has_envelope", detail.HasEnvelope).
+			Bool("envelope_expired", envelopeExpired).
+			Bool("boot_matches", bootMatches).
+			Msg(msg)
+	}()
+
+	detail = session.AuthStatusDetail{}
 
 	if err := s.checkCredentialsAvailable(ctx); err != nil {
 		detail.Status = session.KeyringUnavailable
@@ -1569,6 +1638,8 @@ func (s *Service) AuthStatusDetail(ctx context.Context, email string) (session.A
 		detail.Reason = session.AuthReasonEnvelopeInvalid
 		return detail, fmt.Errorf("app: boot id: %w", err)
 	}
+	bootMatches = env.BootID == bootID
+	envelopeExpired = !env.ExpiresAt.IsZero() && !s.now().Before(env.ExpiresAt)
 
 	if err := env.Validate(ref, bootID, s.now()); err != nil {
 		detail.Status = session.LoggedInLocked
