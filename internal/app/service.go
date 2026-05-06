@@ -13,14 +13,17 @@ import (
 	"strings"
 	"time"
 
+	"github.com/bnema/zerowrap"
+	"golang.org/x/crypto/argon2"
+
 	"github.com/bnema/gtk4-layershell-bitwarden/internal/core/auth"
 	"github.com/bnema/gtk4-layershell-bitwarden/internal/core/cache"
 	"github.com/bnema/gtk4-layershell-bitwarden/internal/core/config"
 	cerrors "github.com/bnema/gtk4-layershell-bitwarden/internal/core/errors"
+	safelog "github.com/bnema/gtk4-layershell-bitwarden/internal/core/logging"
 	"github.com/bnema/gtk4-layershell-bitwarden/internal/core/session"
 	coresync "github.com/bnema/gtk4-layershell-bitwarden/internal/core/sync"
 	"github.com/bnema/gtk4-layershell-bitwarden/internal/core/vault"
-	"golang.org/x/crypto/argon2"
 )
 
 const (
@@ -47,6 +50,48 @@ func newCacheSalt() ([]byte, error) {
 		return nil, err
 	}
 	return salt, nil
+}
+
+func appServiceLog(ctx context.Context, operation string) zerowrap.Logger {
+	return zerowrap.Logger{Logger: zerowrap.FromCtx(ctx).
+		With().
+		Str(zerowrap.FieldComponent, "app.service").
+		Str(zerowrap.FieldOperation, operation).
+		Logger()}
+}
+
+func logAppServiceStart(ctx context.Context, operation string) (zerowrap.Logger, time.Time) {
+	log := appServiceLog(ctx, operation)
+	log.Info().Msg("app service operation started")
+	return log, time.Now()
+}
+
+func logAppServiceFinish(log zerowrap.Logger, started time.Time, err error) {
+	event := log.Info()
+	msg := "app service operation finished"
+	if err != nil {
+		event = log.Error().Str("error_kind", safelog.SafeErrorKind(err))
+		msg = "app service operation failed"
+	}
+	event.Int64(zerowrap.FieldDuration, time.Since(started).Milliseconds()).Msg(msg)
+}
+
+func logAppServiceFinishCount(log zerowrap.Logger, started time.Time, err error, count int) {
+	event := log.Info()
+	msg := "app service operation finished"
+	if err != nil {
+		event = log.Error().Str("error_kind", safelog.SafeErrorKind(err))
+		msg = "app service operation failed"
+	}
+	event.
+		Int("count", count).
+		Int64(zerowrap.FieldDuration, time.Since(started).Milliseconds()).
+		Msg(msg)
+}
+
+func logRemoteSuccessLocalLocked(ctx context.Context, operation string) {
+	log := appServiceLog(ctx, operation)
+	log.Warn().Msg("remote operation succeeded but service locked before local update")
 }
 
 // NewService creates a new Service with the given dependencies.
@@ -82,6 +127,9 @@ func (s *Service) emit(kind EventKind, message string) {
 // keyring. It performs remote login exactly once and requires a non-empty
 // PIN before any remote call.
 func (s *Service) Login(ctx context.Context, input auth.LoginInput) (retErr error) {
+	log, started := logAppServiceStart(ctx, "login")
+	defer func() { logAppServiceFinish(log, started, retErr) }()
+
 	// 1. Validate credentials availability and dependencies before remote login.
 	if err := s.checkCredentialsAvailable(ctx); err != nil {
 		return fmt.Errorf("app: credentials: %w", err)
@@ -108,10 +156,10 @@ func (s *Service) Login(ctx context.Context, input auth.LoginInput) (retErr erro
 	}
 
 	// Ensure local unlocked state/plaintext is cleared on any error after unlock.
-	// Use context.Background() so the lock cleanup is not cancelled by ctx.
+	// Detach from cancellation while preserving logger values for cleanup.
 	defer func() {
 		if retErr != nil {
-			_ = s.Lock(context.Background())
+			_ = s.Lock(context.WithoutCancel(ctx))
 		}
 	}()
 
@@ -199,6 +247,9 @@ func (s *Service) Login(ctx context.Context, input auth.LoginInput) (retErr erro
 
 // Unlock transitions the service from locked to unlocked.
 func (s *Service) Unlock(ctx context.Context, email, password string) (retErr error) {
+	log, started := logAppServiceStart(ctx, "unlock")
+	defer func() { logAppServiceFinish(log, started, retErr) }()
+
 	return s.unlock(ctx, email, password, nil)
 }
 
@@ -216,6 +267,9 @@ func (s *Service) UnlockWithTwoFactor(ctx context.Context, email, password strin
 // success. On PIN mismatch, failure counters are persisted; after max failures
 // the envelope is deleted.
 func (s *Service) UnlockWithPIN(ctx context.Context, email, pin string) (retErr error) {
+	log, started := logAppServiceStart(ctx, "unlock_pin")
+	defer func() { logAppServiceFinish(log, started, retErr) }()
+
 	// 1. Validate dependencies.
 	if err := s.checkCredentialsAvailable(ctx); err != nil {
 		return fmt.Errorf("app: unlock-pin: credentials: %w", err)
@@ -436,6 +490,9 @@ func (s *Service) UnlockWithPIN(ctx context.Context, email, pin string) (retErr 
 // new PIN is required to create a profile and envelope.
 // On any persistence failure, partial credentials are cleaned up.
 func (s *Service) RenewUnlockEnvelope(ctx context.Context, input auth.RenewEnvelopeInput) (retErr error) {
+	log, started := logAppServiceStart(ctx, "renew_unlock_envelope")
+	defer func() { logAppServiceFinish(log, started, retErr) }()
+
 	// 1. Validate dependencies and credentials availability.
 	if err := s.checkCredentialsAvailable(ctx); err != nil {
 		return fmt.Errorf("app: renew-envelope: credentials: %w", err)
@@ -501,9 +558,10 @@ func (s *Service) RenewUnlockEnvelope(ctx context.Context, input auth.RenewEnvel
 	}
 
 	// Ensure local unlocked state/plaintext is cleared on any error after unlock.
+	// Detach from cancellation while preserving logger values for cleanup.
 	defer func() {
 		if retErr != nil {
-			_ = s.Lock(context.Background())
+			_ = s.Lock(context.WithoutCancel(ctx))
 		}
 	}()
 
@@ -612,6 +670,9 @@ func (s *Service) RenewUnlockEnvelope(ctx context.Context, input auth.RenewEnvel
 // without requiring a CLI login. Returns an error if PIN envelope
 // dependencies are unavailable.
 func (s *Service) UnlockAndCreateEnvelope(ctx context.Context, email, password, pin string, prompt auth.TwoFactorPrompt) (retErr error) {
+	log, started := logAppServiceStart(ctx, "unlock_create_envelope")
+	defer func() { logAppServiceFinish(log, started, retErr) }()
+
 	if s.deps.PINEnvelope == nil {
 		return fmt.Errorf("app: unlock-enroll: %w", cerrors.ErrUnsupported)
 	}
@@ -640,9 +701,10 @@ func (s *Service) UnlockAndCreateEnvelope(ctx context.Context, email, password, 
 	}
 
 	// Ensure local unlocked state/plaintext is cleared on any error after unlock.
+	// Detach from cancellation while preserving logger values for cleanup.
 	defer func() {
 		if retErr != nil {
-			_ = s.Lock(context.Background())
+			_ = s.Lock(context.WithoutCancel(ctx))
 		}
 	}()
 
@@ -801,8 +863,8 @@ func (s *Service) unlock(ctx context.Context, email, password string, prompt aut
 		s.emit(IndexReady, "search index ready")
 	}
 
-	// Start background sync worker rooted at context.Background().
-	workerCtx, cancel := context.WithCancel(context.Background())
+	// Start background sync worker detached from cancellation while preserving logger values.
+	workerCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 	s.cancelWorkers = cancel
 	s.emit(Unlocking, "starting sync worker")
 
@@ -815,6 +877,11 @@ func (s *Service) unlock(ctx context.Context, email, password string, prompt aut
 // items, folders, outbox mutations, derived cache key, salt, and whether
 // data was loaded. It does NOT install state on the service.
 func (s *Service) loadCacheData(ctx context.Context, password string) (items []vault.Item, folders []vault.Folder, outbox []coresync.OutboxMutation, key []byte, salt []byte, loaded bool, err error) {
+	log, started := logAppServiceStart(ctx, "cache_load_data")
+	defer func() {
+		logAppServiceFinishCount(log, started, err, len(items)+len(folders)+len(outbox))
+	}()
+
 	salt, err = newCacheSalt()
 	if err != nil {
 		return nil, nil, nil, nil, nil, false, fmt.Errorf("cache salt: %w", err)
@@ -866,6 +933,11 @@ func (s *Service) loadCacheData(ctx context.Context, password string) (items []v
 	if err := json.Unmarshal(plaintext, &plain); err != nil {
 		return nil, nil, nil, nil, nil, false, fmt.Errorf("cache decode: %w", err)
 	}
+	defer func() {
+		clear(plain.ItemsJSON)
+		clear(plain.FoldersJSON)
+		clear(plain.OutboxJSON)
+	}()
 
 	if err := json.Unmarshal(plain.ItemsJSON, &items); err != nil {
 		return nil, nil, nil, nil, nil, false, fmt.Errorf("cache items decode: %w", err)
@@ -890,6 +962,12 @@ func (s *Service) loadCacheData(ctx context.Context, password string) (items []v
 		if loadErr == nil && len(storedMutations) > 0 {
 			outbox = append(outbox, storedMutations...)
 		}
+		if loadErr != nil {
+			log.Warn().
+				Str(zerowrap.FieldOperation, "outbox_load_data").
+				Str("error_kind", safelog.SafeErrorKind(loadErr)).
+				Msg("outbox load skipped")
+		}
 	}
 
 	// Deduplicate outbox mutations by ID, preserving first occurrence.
@@ -912,7 +990,10 @@ func (s *Service) loadCacheData(ctx context.Context, password string) (items []v
 // items, folders, and outbox mutations. It zeros plaintext buffers after
 // decode and does not install any state on the service. If the cache is
 // missing, empty, or unavailable, nil slices and nil error are returned.
-func (s *Service) loadCachedVaultWithKey(ctx context.Context, key []byte) ([]vault.Item, []vault.Folder, []coresync.OutboxMutation, error) {
+func (s *Service) loadCachedVaultWithKey(ctx context.Context, key []byte) (items []vault.Item, folders []vault.Folder, outbox []coresync.OutboxMutation, retErr error) {
+	log, started := logAppServiceStart(ctx, "cache_load_with_material")
+	defer func() { logAppServiceFinishCount(log, started, retErr, len(items)+len(folders)+len(outbox)) }()
+
 	if s.deps.Cache == nil || s.deps.SecretBox == nil {
 		return nil, nil, nil, nil
 	}
@@ -947,35 +1028,35 @@ func (s *Service) loadCachedVaultWithKey(ctx context.Context, key []byte) ([]vau
 	if err := json.Unmarshal(plaintext, &plain); err != nil {
 		return nil, nil, nil, fmt.Errorf("cache decode: %w", err)
 	}
+	defer func() {
+		clear(plain.ItemsJSON)
+		clear(plain.FoldersJSON)
+		clear(plain.OutboxJSON)
+	}()
 
-	var items []vault.Item
 	if err := json.Unmarshal(plain.ItemsJSON, &items); err != nil {
 		return nil, nil, nil, fmt.Errorf("cache items decode: %w", err)
 	}
 
-	var folders []vault.Folder
 	if err := json.Unmarshal(plain.FoldersJSON, &folders); err != nil {
 		return nil, nil, nil, fmt.Errorf("cache folders decode: %w", err)
 	}
 
-	var outbox []coresync.OutboxMutation
 	if len(plain.OutboxJSON) > 0 {
 		if err := json.Unmarshal(plain.OutboxJSON, &outbox); err != nil {
 			return nil, nil, nil, fmt.Errorf("cache outbox decode: %w", err)
 		}
 	}
 
-	// Zero plain JSON fields after decode.
-	clear(plain.ItemsJSON)
-	clear(plain.FoldersJSON)
-	clear(plain.OutboxJSON)
-
 	return items, folders, outbox, nil
 }
 
 // Lock transitions the service from unlocked to locked. It is a compatibility
 // wrapper around SoftLock.
-func (s *Service) Lock(ctx context.Context) error {
+func (s *Service) Lock(ctx context.Context) (retErr error) {
+	log, started := logAppServiceStart(ctx, "lock")
+	defer func() { logAppServiceFinish(log, started, retErr) }()
+
 	return s.SoftLock(ctx)
 }
 
@@ -983,7 +1064,10 @@ func (s *Service) Lock(ctx context.Context) error {
 // outbox, conflicts) and cancels background workers without deleting token
 // bundle, PIN profile, unlock envelope, encrypted cache, or outbox from
 // persistent storage.
-func (s *Service) SoftLock(ctx context.Context) error {
+func (s *Service) SoftLock(ctx context.Context) (retErr error) {
+	log, started := logAppServiceStart(ctx, "soft_lock")
+	defer func() { logAppServiceFinish(log, started, retErr) }()
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -1026,7 +1110,10 @@ func (s *Service) SoftLock(ctx context.Context) error {
 // HardLock performs a soft lock and deletes the unlock envelope for the given
 // email. The token bundle and PIN profile are preserved, allowing the user to
 // renew the envelope with their master password via RenewUnlockEnvelope.
-func (s *Service) HardLock(ctx context.Context, email string) error {
+func (s *Service) HardLock(ctx context.Context, email string) (retErr error) {
+	log, started := logAppServiceStart(ctx, "hard_lock")
+	defer func() { logAppServiceFinish(log, started, retErr) }()
+
 	if err := s.SoftLock(ctx); err != nil {
 		return err
 	}
@@ -1166,7 +1253,10 @@ func (s *Service) Events() <-chan Event {
 // UpdateConfig replaces the current configuration with a validated copy.
 // The only validation error tolerated is ErrEmailRequired (matching Load
 // semantics), allowing first-run or hot-reload scenarios without email.
-func (s *Service) UpdateConfig(ctx context.Context, cfg *config.Config) error {
+func (s *Service) UpdateConfig(ctx context.Context, cfg *config.Config) (retErr error) {
+	log, started := logAppServiceStart(ctx, "update_config")
+	defer func() { logAppServiceFinish(log, started, retErr) }()
+
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -1202,7 +1292,10 @@ func (s *Service) UpdateConfig(ctx context.Context, cfg *config.Config) error {
 }
 
 // Shutdown gracefully shuts down the service.
-func (s *Service) Shutdown(ctx context.Context) error {
+func (s *Service) Shutdown(ctx context.Context) (retErr error) {
+	log, started := logAppServiceStart(ctx, "shutdown")
+	defer func() { logAppServiceFinish(log, started, retErr) }()
+
 	s.mu.Lock()
 	if s.cancelWorkers != nil {
 		s.cancelWorkers()
@@ -1296,7 +1389,7 @@ func (s *Service) zeroCacheKeyLocked() {
 
 // appendOutboxLocked appends a mutation to the outbox and returns it.
 // The caller must hold s.mu.
-func (s *Service) appendOutboxLocked(kind coresync.MutationKind, itemID string, payload []byte) coresync.OutboxMutation {
+func (s *Service) appendOutboxLocked(ctx context.Context, kind coresync.MutationKind, itemID string, payload []byte) coresync.OutboxMutation {
 	s.outboxSeq++
 	m := coresync.OutboxMutation{
 		ID:        fmt.Sprintf("m-%d-%d", s.now().UnixNano(), s.outboxSeq),
@@ -1306,7 +1399,7 @@ func (s *Service) appendOutboxLocked(kind coresync.MutationKind, itemID string, 
 		Payload:   payload,
 	}
 	s.outbox = append(s.outbox, m)
-	s.saveCacheAsyncLocked()
+	s.saveCacheAsyncLocked(ctx)
 	return m
 }
 
@@ -1331,7 +1424,7 @@ func (s *Service) removeReplayedOutboxLocked(replayed []coresync.OutboxMutation)
 
 // saveCacheAsyncLocked snapshots decrypted state, then asynchronously persists
 // encrypted cache and encrypted outbox stores. The caller MUST hold s.mu.
-func (s *Service) saveCacheAsyncLocked() {
+func (s *Service) saveCacheAsyncLocked(ctx context.Context) {
 	key := make([]byte, len(s.cacheKey))
 	copy(key, s.cacheKey)
 	salt := make([]byte, len(s.cacheSalt))
@@ -1345,7 +1438,6 @@ func (s *Service) saveCacheAsyncLocked() {
 	outboxStore := s.deps.Outbox
 	cacheStore := s.deps.Cache
 	box := s.deps.SecretBox
-	logger := s.deps.Logger
 	accountHash := s.accountHashLocked()
 
 	if len(key) == 0 {
@@ -1355,19 +1447,19 @@ func (s *Service) saveCacheAsyncLocked() {
 	s.saveWG.Add(1)
 	go func() {
 		defer s.saveWG.Done()
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 		defer cancel()
 
 		if outboxStore != nil {
-			if err := outboxStore.Save(ctx, key, outboxSnap); err != nil && logger != nil {
-				logger.Error("outbox save failed", "error", err)
-			}
+			outboxLog, outboxStarted := logAppServiceStart(cleanupCtx, "save_outbox")
+			err := outboxStore.Save(cleanupCtx, key, outboxSnap)
+			logAppServiceFinishCount(outboxLog, outboxStarted, err, len(outboxSnap))
 		}
 
 		if cacheStore != nil && box != nil && len(salt) > 0 {
-			if err := saveEncryptedSnapshot(ctx, cacheStore, box, key, salt, accountHash, itemsSnap, foldersSnap, outboxSnap); err != nil && logger != nil {
-				logger.Error("cache save failed", "error", err)
-			}
+			cacheLog, cacheStarted := logAppServiceStart(cleanupCtx, "save_cache")
+			err := saveEncryptedSnapshot(cleanupCtx, cacheStore, box, key, salt, accountHash, itemsSnap, foldersSnap, outboxSnap)
+			logAppServiceFinishCount(cacheLog, cacheStarted, err, len(itemsSnap)+len(foldersSnap)+len(outboxSnap))
 		}
 	}()
 }
@@ -1484,8 +1576,29 @@ func (s *Service) AuthStatus(ctx context.Context, email string) (session.AuthSta
 // AuthStatusDetail returns detailed authentication state for the given email,
 // including the status, reason, and presence/validity of token, PIN profile,
 // and unlock envelope.
-func (s *Service) AuthStatusDetail(ctx context.Context, email string) (session.AuthStatusDetail, error) {
-	detail := session.AuthStatusDetail{}
+func (s *Service) AuthStatusDetail(ctx context.Context, email string) (detail session.AuthStatusDetail, retErr error) {
+	log, started := logAppServiceStart(ctx, "auth_status_detail")
+	var envelopeExpired bool
+	var bootMatches bool
+	defer func() {
+		event := log.Info()
+		msg := "app service operation finished"
+		if retErr != nil {
+			event = log.Error().Str("error_kind", safelog.SafeErrorKind(retErr))
+			msg = "app service operation failed"
+		}
+		event.
+			Int64(zerowrap.FieldDuration, time.Since(started).Milliseconds()).
+			Str("status", string(detail.Status)).
+			Bool("has_token_bundle", detail.HasToken).
+			Bool("has_pin_profile", detail.HasPINProfile).
+			Bool("has_envelope", detail.HasEnvelope).
+			Bool("envelope_expired", envelopeExpired).
+			Bool("boot_matches", bootMatches).
+			Msg(msg)
+	}()
+
+	detail = session.AuthStatusDetail{}
 
 	if err := s.checkCredentialsAvailable(ctx); err != nil {
 		detail.Status = session.KeyringUnavailable
@@ -1558,6 +1671,8 @@ func (s *Service) AuthStatusDetail(ctx context.Context, email string) (session.A
 		detail.Reason = session.AuthReasonEnvelopeInvalid
 		return detail, fmt.Errorf("app: boot id: %w", err)
 	}
+	bootMatches = env.BootID == bootID
+	envelopeExpired = !env.ExpiresAt.IsZero() && !s.now().Before(env.ExpiresAt)
 
 	if err := env.Validate(ref, bootID, s.now()); err != nil {
 		detail.Status = session.LoggedInLocked
@@ -1633,7 +1748,16 @@ func saveEncryptedSnapshot(ctx context.Context, store interface {
 
 // Create creates a new vault item. If remote is available, it tries to create
 // online first. On failure or offline, it queues a pending mutation.
-func (s *Service) Create(ctx context.Context, item vault.Item) (vault.Item, error) {
+func (s *Service) Create(ctx context.Context, item vault.Item) (retItem vault.Item, retErr error) {
+	log, started := logAppServiceStart(ctx, "mutation_create")
+	defer func() {
+		count := 0
+		if retErr == nil && retItem.ID != "" {
+			count = 1
+		}
+		logAppServiceFinishCount(log, started, retErr, count)
+	}()
+
 	s.mu.Lock()
 	if err := s.ensureUnlocked(); err != nil {
 		s.mu.Unlock()
@@ -1648,9 +1772,7 @@ func (s *Service) Create(ctx context.Context, item vault.Item) (vault.Item, erro
 			s.mu.Lock()
 			if err := s.ensureUnlocked(); err != nil {
 				s.mu.Unlock()
-				if s.deps.Logger != nil {
-					s.deps.Logger.Warn("remote create succeeded but service locked before local update", "item_id", remoteItem.ID)
-				}
+				logRemoteSuccessLocalLocked(ctx, "remote_create_local_update")
 				return vault.Item{}, err
 			}
 			remoteItem.SyncStatus = vault.SyncStatusSynced
@@ -1680,7 +1802,7 @@ func (s *Service) Create(ctx context.Context, item vault.Item) (vault.Item, erro
 	if err != nil {
 		return vault.Item{}, fmt.Errorf("app: marshal create payload: %w", err)
 	}
-	s.appendOutboxLocked(coresync.MutationCreate, item.ID, payload)
+	s.appendOutboxLocked(ctx, coresync.MutationCreate, item.ID, payload)
 
 	s.items = append(s.items, item)
 	s.rebuildIndexLocked()
@@ -1690,7 +1812,16 @@ func (s *Service) Create(ctx context.Context, item vault.Item) (vault.Item, erro
 
 // Update updates an existing vault item. Tries remote first, falls back to
 // local pending mutation.
-func (s *Service) Update(ctx context.Context, id string, item vault.Item) (vault.Item, error) {
+func (s *Service) Update(ctx context.Context, id string, item vault.Item) (retItem vault.Item, retErr error) {
+	log, started := logAppServiceStart(ctx, "mutation_update")
+	defer func() {
+		count := 0
+		if retErr == nil && retItem.ID != "" {
+			count = 1
+		}
+		logAppServiceFinishCount(log, started, retErr, count)
+	}()
+
 	s.mu.Lock()
 	if err := s.ensureUnlocked(); err != nil {
 		s.mu.Unlock()
@@ -1704,9 +1835,7 @@ func (s *Service) Update(ctx context.Context, id string, item vault.Item) (vault
 			s.mu.Lock()
 			if err := s.ensureUnlocked(); err != nil {
 				s.mu.Unlock()
-				if s.deps.Logger != nil {
-					s.deps.Logger.Warn("remote update succeeded but service locked before local update", "item_id", id)
-				}
+				logRemoteSuccessLocalLocked(ctx, "remote_update_local_update")
 				return vault.Item{}, err
 			}
 			remoteItem.SyncStatus = vault.SyncStatusSynced
@@ -1737,7 +1866,7 @@ func (s *Service) Update(ctx context.Context, id string, item vault.Item) (vault
 	if err != nil {
 		return vault.Item{}, fmt.Errorf("app: marshal update payload: %w", err)
 	}
-	s.appendOutboxLocked(coresync.MutationUpdate, id, payload)
+	s.appendOutboxLocked(ctx, coresync.MutationUpdate, id, payload)
 
 	found := false
 	for i, existing := range s.items {
@@ -1756,7 +1885,16 @@ func (s *Service) Update(ctx context.Context, id string, item vault.Item) (vault
 }
 
 // Trash moves an item to the trash. Tries remote first, falls back to local pending.
-func (s *Service) Trash(ctx context.Context, id string) error {
+func (s *Service) Trash(ctx context.Context, id string) (retErr error) {
+	log, started := logAppServiceStart(ctx, "mutation_trash")
+	defer func() {
+		count := 0
+		if retErr == nil {
+			count = 1
+		}
+		logAppServiceFinishCount(log, started, retErr, count)
+	}()
+
 	s.mu.Lock()
 	if err := s.ensureUnlocked(); err != nil {
 		s.mu.Unlock()
@@ -1770,9 +1908,7 @@ func (s *Service) Trash(ctx context.Context, id string) error {
 			s.mu.Lock()
 			if err := s.ensureUnlocked(); err != nil {
 				s.mu.Unlock()
-				if s.deps.Logger != nil {
-					s.deps.Logger.Warn("remote trash succeeded but service locked before local update", "item_id", id)
-				}
+				logRemoteSuccessLocalLocked(ctx, "remote_trash_local_update")
 				return err
 			}
 			for i, existing := range s.items {
@@ -1799,7 +1935,7 @@ func (s *Service) Trash(ctx context.Context, id string) error {
 	if err != nil {
 		return fmt.Errorf("app: marshal trash payload: %w", err)
 	}
-	s.appendOutboxLocked(coresync.MutationTrash, id, payload)
+	s.appendOutboxLocked(ctx, coresync.MutationTrash, id, payload)
 
 	for i, existing := range s.items {
 		if existing.ID == id {
@@ -1815,7 +1951,16 @@ func (s *Service) Trash(ctx context.Context, id string) error {
 }
 
 // Restore restores an item from the trash. Tries remote first, falls back to local pending.
-func (s *Service) Restore(ctx context.Context, id string) (vault.Item, error) {
+func (s *Service) Restore(ctx context.Context, id string) (retItem vault.Item, retErr error) {
+	log, started := logAppServiceStart(ctx, "mutation_restore")
+	defer func() {
+		count := 0
+		if retErr == nil && retItem.ID != "" {
+			count = 1
+		}
+		logAppServiceFinishCount(log, started, retErr, count)
+	}()
+
 	s.mu.Lock()
 	if err := s.ensureUnlocked(); err != nil {
 		s.mu.Unlock()
@@ -1829,9 +1974,7 @@ func (s *Service) Restore(ctx context.Context, id string) (vault.Item, error) {
 			s.mu.Lock()
 			if err := s.ensureUnlocked(); err != nil {
 				s.mu.Unlock()
-				if s.deps.Logger != nil {
-					s.deps.Logger.Warn("remote restore succeeded but service locked before local update", "item_id", id)
-				}
+				logRemoteSuccessLocalLocked(ctx, "remote_restore_local_update")
 				return vault.Item{}, err
 			}
 			remoteItem.Deleted = false
@@ -1859,7 +2002,7 @@ func (s *Service) Restore(ctx context.Context, id string) (vault.Item, error) {
 	if err != nil {
 		return vault.Item{}, fmt.Errorf("app: marshal restore payload: %w", err)
 	}
-	s.appendOutboxLocked(coresync.MutationRestore, id, payload)
+	s.appendOutboxLocked(ctx, coresync.MutationRestore, id, payload)
 
 	var restored vault.Item
 	for i, existing := range s.items {
@@ -1877,7 +2020,16 @@ func (s *Service) Restore(ctx context.Context, id string) (vault.Item, error) {
 }
 
 // Delete permanently deletes a vault item. Tries remote first, falls back to local pending.
-func (s *Service) Delete(ctx context.Context, id string) error {
+func (s *Service) Delete(ctx context.Context, id string) (retErr error) {
+	log, started := logAppServiceStart(ctx, "mutation_delete")
+	defer func() {
+		count := 0
+		if retErr == nil {
+			count = 1
+		}
+		logAppServiceFinishCount(log, started, retErr, count)
+	}()
+
 	s.mu.Lock()
 	if err := s.ensureUnlocked(); err != nil {
 		s.mu.Unlock()
@@ -1891,9 +2043,7 @@ func (s *Service) Delete(ctx context.Context, id string) error {
 			s.mu.Lock()
 			if err := s.ensureUnlocked(); err != nil {
 				s.mu.Unlock()
-				if s.deps.Logger != nil {
-					s.deps.Logger.Warn("remote delete succeeded but service locked before local update", "item_id", id)
-				}
+				logRemoteSuccessLocalLocked(ctx, "remote_delete_local_update")
 				return err
 			}
 			for i, existing := range s.items {
@@ -1919,7 +2069,7 @@ func (s *Service) Delete(ctx context.Context, id string) error {
 	if err != nil {
 		return fmt.Errorf("app: marshal delete payload: %w", err)
 	}
-	s.appendOutboxLocked(coresync.MutationDelete, id, payload)
+	s.appendOutboxLocked(ctx, coresync.MutationDelete, id, payload)
 
 	for i, existing := range s.items {
 		if existing.ID == id {
@@ -1934,27 +2084,54 @@ func (s *Service) Delete(ctx context.Context, id string) error {
 }
 
 // ListAttachments is not yet supported.
-func (s *Service) ListAttachments(ctx context.Context, itemID string) ([]vault.Attachment, error) {
+func (s *Service) ListAttachments(ctx context.Context, itemID string) (attachments []vault.Attachment, retErr error) {
+	log, started := logAppServiceStart(ctx, "attachment_list")
+	defer func() { logAppServiceFinish(log, started, retErr) }()
+
 	return nil, cerrors.ErrUnsupported
 }
 
 // DownloadAttachment is not yet supported.
-func (s *Service) DownloadAttachment(ctx context.Context, itemID, attachmentID string, dst io.Writer) error {
+func (s *Service) DownloadAttachment(ctx context.Context, itemID, attachmentID string, dst io.Writer) (retErr error) {
+	log, started := logAppServiceStart(ctx, "attachment_download")
+	defer func() { logAppServiceFinish(log, started, retErr) }()
+
 	return cerrors.ErrUnsupported
 }
 
 // UploadAttachment is not yet supported.
-func (s *Service) UploadAttachment(ctx context.Context, itemID, fileName string, size int64, src io.Reader) (vault.Attachment, error) {
+func (s *Service) UploadAttachment(ctx context.Context, itemID, fileName string, size int64, src io.Reader) (attachment vault.Attachment, retErr error) {
+	log, started := logAppServiceStart(ctx, "attachment_upload")
+	defer func() { logAppServiceFinish(log, started, retErr) }()
+
 	return vault.Attachment{}, cerrors.ErrUnsupported
 }
 
 // DeleteAttachment is not yet supported.
-func (s *Service) DeleteAttachment(ctx context.Context, itemID, attachmentID string) error {
+func (s *Service) DeleteAttachment(ctx context.Context, itemID, attachmentID string) (retErr error) {
+	log, started := logAppServiceStart(ctx, "attachment_delete")
+	defer func() { logAppServiceFinish(log, started, retErr) }()
+
 	return cerrors.ErrUnsupported
 }
 
 // ResolveConflict resolves a sync conflict by applying the given resolution.
-func (s *Service) ResolveConflict(ctx context.Context, conflictID string, resolution coresync.ConflictResolution) error {
+func (s *Service) ResolveConflict(ctx context.Context, conflictID string, resolution coresync.ConflictResolution) (retErr error) {
+	log, started := logAppServiceStart(ctx, "conflict_resolve")
+	defer func() {
+		event := log.Info()
+		msg := "app service operation finished"
+		if retErr != nil {
+			event = log.Error().Str("error_kind", safelog.SafeErrorKind(retErr))
+			msg = "app service operation failed"
+		}
+		event.
+			Str("resolution", string(resolution)).
+			Int("count", 1).
+			Int64(zerowrap.FieldDuration, time.Since(started).Milliseconds()).
+			Msg(msg)
+	}()
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -2083,7 +2260,7 @@ func (s *Service) ResolveConflict(ctx context.Context, conflictID string, resolu
 	}
 
 	s.rebuildIndexLocked()
-	s.saveCacheAsyncLocked()
+	s.saveCacheAsyncLocked(ctx)
 	s.emit(SyncUpdated, "conflict resolved")
 	return nil
 }
@@ -2094,7 +2271,10 @@ func (s *Service) ResolveConflict(ctx context.Context, conflictID string, resolu
 
 // replayOutbox replays outbox mutations against the remote. It must be called
 // OUTSIDE of s.mu to avoid deadlocks with Remote methods.
-func (s *Service) replayOutbox(ctx context.Context, outbox []coresync.OutboxMutation) error {
+func (s *Service) replayOutbox(ctx context.Context, outbox []coresync.OutboxMutation) (retErr error) {
+	log, started := logAppServiceStart(ctx, "outbox_replay")
+	defer func() { logAppServiceFinishCount(log, started, retErr, len(outbox)) }()
+
 	if s.deps.Remote == nil {
 		return nil
 	}
@@ -2146,6 +2326,11 @@ func (s *Service) replayOutbox(ctx context.Context, outbox []coresync.OutboxMuta
 // syncOnce performs a single sync cycle: checks remote revision, pushes local
 // mutations, pulls remote changes, and detects conflicts.
 func (s *Service) syncOnce(ctx context.Context) {
+	log, started := logAppServiceStart(ctx, "sync_once")
+	var opErr error
+	var count int
+	defer func() { logAppServiceFinishCount(log, started, opErr, count) }()
+
 	s.emit(SyncChecking, "checking remote revision")
 
 	if s.deps.Remote == nil {
@@ -2154,6 +2339,7 @@ func (s *Service) syncOnce(ctx context.Context) {
 
 	rev, err := s.deps.Remote.Revision(ctx)
 	if err != nil {
+		opErr = err
 		s.emit(SyncFailed, fmt.Sprintf("revision check failed: %v", err))
 		return
 	}
@@ -2173,9 +2359,11 @@ func (s *Service) syncOnce(ctx context.Context) {
 	// Fetch remote changes.
 	remoteItems, remoteFolders, remoteRev, err := s.deps.Remote.Sync(ctx)
 	if err != nil {
+		opErr = err
 		s.emit(SyncFailed, fmt.Sprintf("remote sync failed: %v", err))
 		return
 	}
+	count = len(remoteItems) + len(remoteFolders) + len(outboxSnapshot)
 
 	// Build remote change list for conflict detection.
 	remoteChanges := make([]coresync.RemoteChange, 0, len(remoteItems))
@@ -2192,6 +2380,7 @@ func (s *Service) syncOnce(ctx context.Context) {
 
 	// Check context cancellation before proceeding.
 	if ctx.Err() != nil {
+		opErr = ctx.Err()
 		s.mu.Unlock()
 		return
 	}
@@ -2199,6 +2388,9 @@ func (s *Service) syncOnce(ctx context.Context) {
 	// Detect conflicts.
 	conflicts := coresync.DetectConflicts(outboxSnapshot, remoteChanges)
 	if len(conflicts) > 0 {
+		log.Warn().
+			Int("count", len(conflicts)).
+			Msg("sync conflicts detected")
 		// Store pending remote state for conflict resolution.
 		s.pendingRemoteItems = make([]vault.Item, len(remoteItems))
 		copy(s.pendingRemoteItems, remoteItems)
@@ -2226,6 +2418,7 @@ func (s *Service) syncOnce(ctx context.Context) {
 	// No conflicts: replay outbox before installing remote state.
 	if len(outboxSnapshot) > 0 {
 		if err := s.replayOutbox(ctx, outboxSnapshot); err != nil {
+			opErr = err
 			s.emit(SyncFailed, fmt.Sprintf("outbox replay failed: %v", err))
 			// Do NOT clear outbox or install remote state on replay failure.
 			return
@@ -2234,10 +2427,12 @@ func (s *Service) syncOnce(ctx context.Context) {
 		// Re-fetch remote state after successful replay.
 		remoteItems, remoteFolders, remoteRev, err = s.deps.Remote.Sync(ctx)
 		if err != nil {
+			opErr = err
 			s.emit(SyncFailed, fmt.Sprintf("post-replay sync failed: %v", err))
 			// Keep outbox intact.
 			return
 		}
+		count = len(remoteItems) + len(remoteFolders) + len(outboxSnapshot)
 	}
 
 	// Install final remote state under lock.
@@ -2245,6 +2440,7 @@ func (s *Service) syncOnce(ctx context.Context) {
 	defer s.mu.Unlock()
 
 	if ctx.Err() != nil {
+		opErr = ctx.Err()
 		return
 	}
 
@@ -2262,7 +2458,7 @@ func (s *Service) syncOnce(ctx context.Context) {
 	s.emit(SyncUpdated, fmt.Sprintf("sync complete (rev: %s)", remoteRev))
 
 	// Persist cleared outbox.
-	s.saveCacheAsyncLocked()
+	s.saveCacheAsyncLocked(ctx)
 }
 
 // syncInterval returns the sync interval to use, falling back through

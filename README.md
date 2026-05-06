@@ -179,6 +179,40 @@ config file.
 
 ---
 
+## Logging
+
+The backend writes logs to a rotating file by default:
+
+```
+$XDG_STATE_HOME/gtk4-layershell-bitwarden/logs/gtk4-layershell-bitwarden.log
+```
+
+On Linux, if `$XDG_STATE_HOME` is unset, the default path falls back to:
+
+```
+~/.local/state/gtk4-layershell-bitwarden/logs/gtk4-layershell-bitwarden.log
+```
+
+Default logging is **file-only**, level `info`, and JSON formatted. Set
+`GLSBW_LOG_CONSOLE=true` to mirror log output to stderr as well as the file.
+
+| Environment variable | Purpose |
+|---|---|
+| `GLSBW_LOG_LEVEL` | Log level: `trace`, `debug`, `info`, `warn`, `warning`, `error`, `fatal`, `panic`, or `disabled` |
+| `GLSBW_LOG_FORMAT` | File format: `json` or `console` |
+| `GLSBW_LOG_CONSOLE` | Boolean; when `true`, mirrors logs to stderr |
+| `GLSBW_LOG_PATH` | Override the log file path |
+| `GLSBW_LOG_MAX_SIZE_MB` | Rotate after this many MiB |
+| `GLSBW_LOG_MAX_BACKUPS` | Number of rotated backups to keep |
+| `GLSBW_LOG_MAX_AGE_DAYS` | Maximum age of rotated logs in days |
+
+Invalid logging environment values fail startup with a clear error naming the
+invalid variable. The project follows a strict **no-secret logging** policy:
+passwords, tokens, PINs, vault keys, and vault content must never be written to
+logs.
+
+---
+
 ## Compositor Hotkey
 
 Bind a compositor hotkey to launch the overlay. Example for Sway:
@@ -228,8 +262,7 @@ phase.
     falls back to `os.UserCacheDir()`, then `os.TempDir()`.
   - **State / Log**: `$XDG_STATE_HOME/gtk4-layershell-bitwarden/` —
     falls back to `$HOME/.local/state/`, then `os.TempDir()/state/`.
-    A `LogFile()` path helper exists for future use; the current logger
-    defaults to discard unless injected.
+    Backend logs are written under the `logs/` subdirectory by default.
 - **Encrypted cache**: The vault snapshot and outbox are stored on disk
   encrypted with a key derived from the master password using Argon2id and a
   persisted per-cache salt. See `internal/adapters/cache/`.

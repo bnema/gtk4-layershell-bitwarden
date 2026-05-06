@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/bnema/zerowrap"
 	"github.com/spf13/cobra"
 
 	cryptobox "github.com/bnema/gtk4-layershell-bitwarden/internal/adapters/cache/crypto"
@@ -14,7 +15,6 @@ import (
 	viperadapter "github.com/bnema/gtk4-layershell-bitwarden/internal/adapters/config/viper"
 	"github.com/bnema/gtk4-layershell-bitwarden/internal/adapters/gui/gtk"
 	"github.com/bnema/gtk4-layershell-bitwarden/internal/adapters/gui/layershell"
-	loggeradapter "github.com/bnema/gtk4-layershell-bitwarden/internal/adapters/logging"
 	"github.com/bnema/gtk4-layershell-bitwarden/internal/adapters/paths/xdg"
 	remoteadapter "github.com/bnema/gtk4-layershell-bitwarden/internal/adapters/remote/bitwarden"
 	keyring "github.com/bnema/gtk4-layershell-bitwarden/internal/adapters/secrets/keyring"
@@ -22,6 +22,7 @@ import (
 	"github.com/bnema/gtk4-layershell-bitwarden/internal/adapters/session/pinenvelope"
 	"github.com/bnema/gtk4-layershell-bitwarden/internal/app"
 	coreconfig "github.com/bnema/gtk4-layershell-bitwarden/internal/core/config"
+	safelog "github.com/bnema/gtk4-layershell-bitwarden/internal/core/logging"
 	"github.com/bnema/gtk4-layershell-bitwarden/internal/core/session"
 	"github.com/bnema/gtk4-layershell-bitwarden/internal/ports/in"
 	"github.com/bnema/gtk4-layershell-bitwarden/internal/ports/out"
@@ -49,6 +50,9 @@ func NewRootCommand(opts Options) *cobra.Command {
 		Use:   "gtk4-layershell-bitwarden",
 		Short: "Bitwarden desktop client for GTK4 layershell",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			log := zerowrap.FromCtx(cmd.Context()).WithField(zerowrap.FieldComponent, "cli.root")
+			log.Info().Str(zerowrap.FieldOperation, "root").Msg("root command started")
+
 			layershell.EnsurePreloaded()
 			cmd.Println(fmt.Sprintf("gtk4-layershell-bitwarden %s", opts.Version))
 
@@ -58,23 +62,29 @@ func NewRootCommand(opts Options) *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("config load: %w", err)
 			}
+			log.Info().Str(zerowrap.FieldOperation, "load_config").Msg("config loaded")
 
 			// Compute cache/outbox paths once.
 			cachePath, outboxPath := xdg.Default().CacheFile(), xdg.Default().OutboxFile()
 
 			// Compose application service.
+			log.Info().Str(zerowrap.FieldOperation, "compose_service").Msg("service composition started")
 			svc, err := composeAppService(opts, cmd.Context(), cfg, cachePath, outboxPath)
 			if err != nil {
 				return fmt.Errorf("compose service: %w", err)
 			}
+			log.Info().Str(zerowrap.FieldOperation, "compose_service").Msg("service composition finished")
 
 			// Start config hot-reload watcher using the command's context so that
 			// cancellation propagates to the UpdateConfig call.
 			go func() {
+				watchLog := zerowrap.FromCtx(cmd.Context()).WithField(zerowrap.FieldComponent, "cli.root")
 				_ = mgr.Watch(cmd.Context(), func(newCfg *coreconfig.Config) {
 					if uerr := svc.UpdateConfig(cmd.Context(), newCfg); uerr != nil {
-						// Log via redacting logger; do not panic on invalid reload.
-						_ = uerr // ignored to avoid noise if no logger available
+						watchLog.Warn().
+							Str(zerowrap.FieldOperation, "config_hot_reload").
+							Str("error_kind", safelog.SafeErrorKind(uerr)).
+							Msg("config hot reload rejected")
 					}
 				})
 			}()
@@ -88,12 +98,14 @@ func NewRootCommand(opts Options) *cobra.Command {
 				}
 			}
 
+			log.Info().Str(zerowrap.FieldOperation, "run_overlay").Msg("overlay started")
 			if err := runner(cmd.Context(), svc); err != nil {
 				if strings.Contains(err.Error(), "layer-shell is not available") {
 					return fmt.Errorf("%w\n\nGTK layer-shell is not available in this session. Use `gtk4-layershell-bitwarden login`, `unlock`, or `status` from a terminal, or run the overlay inside a layer-shell-capable Wayland compositor", err)
 				}
 				return err
 			}
+			log.Info().Str(zerowrap.FieldOperation, "run_overlay").Msg("overlay finished")
 			return nil
 		},
 	}
@@ -127,8 +139,9 @@ func composeAppService(opts Options, ctx context.Context, cfg *coreconfig.Config
 }
 
 func composeService(ctx context.Context, cfg *coreconfig.Config, cachePath, outboxPath string) (in.AppService, error) {
-	// Logger: discard by default (nil → io.Discard).
-	logger := loggeradapter.New(nil)
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 
 	// Secret box for cache/outbox encryption.
 	box := cryptobox.NewBox()
@@ -154,7 +167,6 @@ func composeService(ctx context.Context, cfg *coreconfig.Config, cachePath, outb
 		Cache:       cacheStore,
 		Outbox:      outboxStore,
 		SecretBox:   box,
-		Logger:      logger,
 		Config:      cfg,
 		Credentials: credentials,
 		BootID:      bootID,
