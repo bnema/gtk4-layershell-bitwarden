@@ -989,11 +989,9 @@ func TestLockCancelsSyncInstall(t *testing.T) {
 	defer cancel()
 
 	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		svc.syncOnce(ctx)
-	}()
+	})
 
 	// Wait for syncOnce to reach Remote.Sync (which blocks on syncBlockCh).
 	<-fr.syncEnterCh

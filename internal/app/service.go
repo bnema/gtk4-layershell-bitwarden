@@ -1448,9 +1448,7 @@ func (s *Service) saveCacheAsyncLocked(ctx context.Context) {
 		return
 	}
 
-	s.saveWG.Add(1)
-	go func() {
-		defer s.saveWG.Done()
+	s.saveWG.Go(func() {
 		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 		defer cancel()
 
@@ -1465,7 +1463,7 @@ func (s *Service) saveCacheAsyncLocked(ctx context.Context) {
 			err := saveEncryptedSnapshot(cleanupCtx, cacheStore, box, key, salt, accountHash, itemsSnap, foldersSnap, outboxSnap)
 			logAppServiceFinishCount(cacheLog, cacheStarted, err, len(itemsSnap)+len(foldersSnap)+len(outboxSnap))
 		}
-	}()
+	})
 }
 
 func (s *Service) accountHashLocked() string {
