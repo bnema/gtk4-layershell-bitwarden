@@ -19,6 +19,7 @@ require (
 
 require (
 	github.com/bnema/purego v0.11.0-bnema.2 // indirect
+	github.com/bnema/zerowrap v1.4.0
 	github.com/danieljoos/wincred v1.2.3 // indirect
 	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/go-viper/mapstructure/v2 v2.4.0 // indirect
