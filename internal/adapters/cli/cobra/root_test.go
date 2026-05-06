@@ -11,6 +11,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	adapterlogging "github.com/bnema/gtk4-layershell-bitwarden/internal/adapters/logging"
+	"github.com/bnema/gtk4-layershell-bitwarden/internal/app"
+	coreconfig "github.com/bnema/gtk4-layershell-bitwarden/internal/core/config"
 	"github.com/bnema/gtk4-layershell-bitwarden/internal/core/session"
 	"github.com/bnema/gtk4-layershell-bitwarden/internal/ports/in"
 )
@@ -18,13 +21,20 @@ import (
 // executeCmd runs the root command with the given args and returns stdout/stderr.
 func executeCmd(t *testing.T, opts Options, args []string) (string, error) {
 	t.Helper()
+	out, stderr, err := executeCmdWithContext(t, context.Background(), opts, args)
+	return out + stderr, err
+}
+
+func executeCmdWithContext(t *testing.T, ctx context.Context, opts Options, args []string) (string, string, error) {
+	t.Helper()
 	root := NewRootCommand(opts)
-	buf := new(bytes.Buffer)
-	root.SetOut(buf)
-	root.SetErr(buf)
+	stdout := new(bytes.Buffer)
+	stderr := new(bytes.Buffer)
+	root.SetOut(stdout)
+	root.SetErr(stderr)
 	root.SetArgs(args)
-	err := root.ExecuteContext(context.Background())
-	return buf.String(), err
+	err := root.ExecuteContext(ctx)
+	return stdout.String(), stderr.String(), err
 }
 
 func TestRootCommandPrintsVersion(t *testing.T) {
@@ -45,6 +55,71 @@ func TestRootCommandPrintsVersion(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, out, "gtk4-layershell-bitwarden v0.1.0-test")
 	assert.True(t, called, "RunOverlay should have been called")
+}
+
+func TestRootCommandLifecycleLogsUseContext(t *testing.T) {
+	stateHome := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", stateHome)
+
+	ctx, cleanup, meta, err := adapterlogging.NewContextFromEnv(context.Background(), "v0.1.0-test")
+	require.NoError(t, err)
+	cleanupPending := true
+	defer func() {
+		if cleanupPending {
+			cleanup()
+		}
+	}()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+
+	composeCalled := false
+	overlayCalled := false
+	opts := Options{
+		Version:    "v0.1.0-test",
+		ConfigPath: path,
+		ComposeService: func(ctx context.Context, cfg *coreconfig.Config, cachePath, outboxPath string) (in.AppService, error) {
+			composeCalled = true
+			require.NotNil(t, ctx)
+			require.NotNil(t, cfg)
+			require.NotEmpty(t, cachePath)
+			require.NotEmpty(t, outboxPath)
+			return app.NewService(app.Deps{Config: cfg}), nil
+		},
+		RunOverlay: func(ctx context.Context, svc in.AppService) error {
+			overlayCalled = true
+			require.NotNil(t, ctx)
+			require.NotNil(t, svc)
+			return nil
+		},
+	}
+
+	stdout, stderr, err := executeCmdWithContext(t, ctx, opts, []string{})
+	require.NoError(t, err)
+	require.True(t, composeCalled, "ComposeService should have been called")
+	require.True(t, overlayCalled, "RunOverlay should have been called")
+
+	for _, stream := range []string{stdout, stderr} {
+		assert.NotContains(t, stream, "root command started")
+		assert.NotContains(t, stream, "config loaded")
+		assert.NotContains(t, stream, "service composition started")
+		assert.NotContains(t, stream, "service composition finished")
+		assert.NotContains(t, stream, "overlay started")
+		assert.NotContains(t, stream, "overlay finished")
+	}
+
+	cleanup()
+	cleanupPending = false
+	data, err := os.ReadFile(meta.Path)
+	require.NoError(t, err)
+	logs := string(data)
+	assert.Contains(t, logs, "root command started")
+	assert.Contains(t, logs, "config loaded")
+	assert.Contains(t, logs, "service composition started")
+	assert.Contains(t, logs, "service composition finished")
+	assert.Contains(t, logs, "overlay started")
+	assert.Contains(t, logs, "overlay finished")
+	assert.NotContains(t, logs, "test@example.com")
 }
 
 func TestRootCommandFailsOnInvalidConfig(t *testing.T) {

@@ -13,14 +13,17 @@ import (
 	"strings"
 	"time"
 
+	"github.com/bnema/zerowrap"
+	"golang.org/x/crypto/argon2"
+
 	"github.com/bnema/gtk4-layershell-bitwarden/internal/core/auth"
 	"github.com/bnema/gtk4-layershell-bitwarden/internal/core/cache"
 	"github.com/bnema/gtk4-layershell-bitwarden/internal/core/config"
 	cerrors "github.com/bnema/gtk4-layershell-bitwarden/internal/core/errors"
+	safelog "github.com/bnema/gtk4-layershell-bitwarden/internal/core/logging"
 	"github.com/bnema/gtk4-layershell-bitwarden/internal/core/session"
 	coresync "github.com/bnema/gtk4-layershell-bitwarden/internal/core/sync"
 	"github.com/bnema/gtk4-layershell-bitwarden/internal/core/vault"
-	"golang.org/x/crypto/argon2"
 )
 
 const (
@@ -1296,7 +1299,7 @@ func (s *Service) zeroCacheKeyLocked() {
 
 // appendOutboxLocked appends a mutation to the outbox and returns it.
 // The caller must hold s.mu.
-func (s *Service) appendOutboxLocked(kind coresync.MutationKind, itemID string, payload []byte) coresync.OutboxMutation {
+func (s *Service) appendOutboxLocked(ctx context.Context, kind coresync.MutationKind, itemID string, payload []byte) coresync.OutboxMutation {
 	s.outboxSeq++
 	m := coresync.OutboxMutation{
 		ID:        fmt.Sprintf("m-%d-%d", s.now().UnixNano(), s.outboxSeq),
@@ -1306,7 +1309,7 @@ func (s *Service) appendOutboxLocked(kind coresync.MutationKind, itemID string, 
 		Payload:   payload,
 	}
 	s.outbox = append(s.outbox, m)
-	s.saveCacheAsyncLocked()
+	s.saveCacheAsyncLocked(ctx)
 	return m
 }
 
@@ -1331,7 +1334,7 @@ func (s *Service) removeReplayedOutboxLocked(replayed []coresync.OutboxMutation)
 
 // saveCacheAsyncLocked snapshots decrypted state, then asynchronously persists
 // encrypted cache and encrypted outbox stores. The caller MUST hold s.mu.
-func (s *Service) saveCacheAsyncLocked() {
+func (s *Service) saveCacheAsyncLocked(ctx context.Context) {
 	key := make([]byte, len(s.cacheKey))
 	copy(key, s.cacheKey)
 	salt := make([]byte, len(s.cacheSalt))
@@ -1345,7 +1348,6 @@ func (s *Service) saveCacheAsyncLocked() {
 	outboxStore := s.deps.Outbox
 	cacheStore := s.deps.Cache
 	box := s.deps.SecretBox
-	logger := s.deps.Logger
 	accountHash := s.accountHashLocked()
 
 	if len(key) == 0 {
@@ -1355,18 +1357,25 @@ func (s *Service) saveCacheAsyncLocked() {
 	s.saveWG.Add(1)
 	go func() {
 		defer s.saveWG.Done()
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 		defer cancel()
+		log := zerowrap.FromCtx(cleanupCtx).WithField(zerowrap.FieldComponent, "app.service")
 
 		if outboxStore != nil {
-			if err := outboxStore.Save(ctx, key, outboxSnap); err != nil && logger != nil {
-				logger.Error("outbox save failed", "error", err)
+			if err := outboxStore.Save(cleanupCtx, key, outboxSnap); err != nil {
+				log.Error().
+					Str(zerowrap.FieldOperation, "save_outbox").
+					Str("error_kind", safelog.SafeErrorKind(err)).
+					Msg("outbox save failed")
 			}
 		}
 
 		if cacheStore != nil && box != nil && len(salt) > 0 {
-			if err := saveEncryptedSnapshot(ctx, cacheStore, box, key, salt, accountHash, itemsSnap, foldersSnap, outboxSnap); err != nil && logger != nil {
-				logger.Error("cache save failed", "error", err)
+			if err := saveEncryptedSnapshot(cleanupCtx, cacheStore, box, key, salt, accountHash, itemsSnap, foldersSnap, outboxSnap); err != nil {
+				log.Error().
+					Str(zerowrap.FieldOperation, "save_cache").
+					Str("error_kind", safelog.SafeErrorKind(err)).
+					Msg("cache save failed")
 			}
 		}
 	}()
@@ -1648,9 +1657,10 @@ func (s *Service) Create(ctx context.Context, item vault.Item) (vault.Item, erro
 			s.mu.Lock()
 			if err := s.ensureUnlocked(); err != nil {
 				s.mu.Unlock()
-				if s.deps.Logger != nil {
-					s.deps.Logger.Warn("remote create succeeded but service locked before local update", "item_id", remoteItem.ID)
-				}
+				log := zerowrap.FromCtx(ctx).WithField(zerowrap.FieldComponent, "app.service")
+				log.Warn().
+					Str(zerowrap.FieldOperation, "remote_create_local_update").
+					Msg("remote create succeeded but service locked before local update")
 				return vault.Item{}, err
 			}
 			remoteItem.SyncStatus = vault.SyncStatusSynced
@@ -1680,7 +1690,7 @@ func (s *Service) Create(ctx context.Context, item vault.Item) (vault.Item, erro
 	if err != nil {
 		return vault.Item{}, fmt.Errorf("app: marshal create payload: %w", err)
 	}
-	s.appendOutboxLocked(coresync.MutationCreate, item.ID, payload)
+	s.appendOutboxLocked(ctx, coresync.MutationCreate, item.ID, payload)
 
 	s.items = append(s.items, item)
 	s.rebuildIndexLocked()
@@ -1704,9 +1714,10 @@ func (s *Service) Update(ctx context.Context, id string, item vault.Item) (vault
 			s.mu.Lock()
 			if err := s.ensureUnlocked(); err != nil {
 				s.mu.Unlock()
-				if s.deps.Logger != nil {
-					s.deps.Logger.Warn("remote update succeeded but service locked before local update", "item_id", id)
-				}
+				log := zerowrap.FromCtx(ctx).WithField(zerowrap.FieldComponent, "app.service")
+				log.Warn().
+					Str(zerowrap.FieldOperation, "remote_update_local_update").
+					Msg("remote update succeeded but service locked before local update")
 				return vault.Item{}, err
 			}
 			remoteItem.SyncStatus = vault.SyncStatusSynced
@@ -1737,7 +1748,7 @@ func (s *Service) Update(ctx context.Context, id string, item vault.Item) (vault
 	if err != nil {
 		return vault.Item{}, fmt.Errorf("app: marshal update payload: %w", err)
 	}
-	s.appendOutboxLocked(coresync.MutationUpdate, id, payload)
+	s.appendOutboxLocked(ctx, coresync.MutationUpdate, id, payload)
 
 	found := false
 	for i, existing := range s.items {
@@ -1770,9 +1781,10 @@ func (s *Service) Trash(ctx context.Context, id string) error {
 			s.mu.Lock()
 			if err := s.ensureUnlocked(); err != nil {
 				s.mu.Unlock()
-				if s.deps.Logger != nil {
-					s.deps.Logger.Warn("remote trash succeeded but service locked before local update", "item_id", id)
-				}
+				log := zerowrap.FromCtx(ctx).WithField(zerowrap.FieldComponent, "app.service")
+				log.Warn().
+					Str(zerowrap.FieldOperation, "remote_trash_local_update").
+					Msg("remote trash succeeded but service locked before local update")
 				return err
 			}
 			for i, existing := range s.items {
@@ -1799,7 +1811,7 @@ func (s *Service) Trash(ctx context.Context, id string) error {
 	if err != nil {
 		return fmt.Errorf("app: marshal trash payload: %w", err)
 	}
-	s.appendOutboxLocked(coresync.MutationTrash, id, payload)
+	s.appendOutboxLocked(ctx, coresync.MutationTrash, id, payload)
 
 	for i, existing := range s.items {
 		if existing.ID == id {
@@ -1829,9 +1841,10 @@ func (s *Service) Restore(ctx context.Context, id string) (vault.Item, error) {
 			s.mu.Lock()
 			if err := s.ensureUnlocked(); err != nil {
 				s.mu.Unlock()
-				if s.deps.Logger != nil {
-					s.deps.Logger.Warn("remote restore succeeded but service locked before local update", "item_id", id)
-				}
+				log := zerowrap.FromCtx(ctx).WithField(zerowrap.FieldComponent, "app.service")
+				log.Warn().
+					Str(zerowrap.FieldOperation, "remote_restore_local_update").
+					Msg("remote restore succeeded but service locked before local update")
 				return vault.Item{}, err
 			}
 			remoteItem.Deleted = false
@@ -1859,7 +1872,7 @@ func (s *Service) Restore(ctx context.Context, id string) (vault.Item, error) {
 	if err != nil {
 		return vault.Item{}, fmt.Errorf("app: marshal restore payload: %w", err)
 	}
-	s.appendOutboxLocked(coresync.MutationRestore, id, payload)
+	s.appendOutboxLocked(ctx, coresync.MutationRestore, id, payload)
 
 	var restored vault.Item
 	for i, existing := range s.items {
@@ -1891,9 +1904,10 @@ func (s *Service) Delete(ctx context.Context, id string) error {
 			s.mu.Lock()
 			if err := s.ensureUnlocked(); err != nil {
 				s.mu.Unlock()
-				if s.deps.Logger != nil {
-					s.deps.Logger.Warn("remote delete succeeded but service locked before local update", "item_id", id)
-				}
+				log := zerowrap.FromCtx(ctx).WithField(zerowrap.FieldComponent, "app.service")
+				log.Warn().
+					Str(zerowrap.FieldOperation, "remote_delete_local_update").
+					Msg("remote delete succeeded but service locked before local update")
 				return err
 			}
 			for i, existing := range s.items {
@@ -1919,7 +1933,7 @@ func (s *Service) Delete(ctx context.Context, id string) error {
 	if err != nil {
 		return fmt.Errorf("app: marshal delete payload: %w", err)
 	}
-	s.appendOutboxLocked(coresync.MutationDelete, id, payload)
+	s.appendOutboxLocked(ctx, coresync.MutationDelete, id, payload)
 
 	for i, existing := range s.items {
 		if existing.ID == id {
@@ -2083,7 +2097,7 @@ func (s *Service) ResolveConflict(ctx context.Context, conflictID string, resolu
 	}
 
 	s.rebuildIndexLocked()
-	s.saveCacheAsyncLocked()
+	s.saveCacheAsyncLocked(ctx)
 	s.emit(SyncUpdated, "conflict resolved")
 	return nil
 }
@@ -2262,7 +2276,7 @@ func (s *Service) syncOnce(ctx context.Context) {
 	s.emit(SyncUpdated, fmt.Sprintf("sync complete (rev: %s)", remoteRev))
 
 	// Persist cleared outbox.
-	s.saveCacheAsyncLocked()
+	s.saveCacheAsyncLocked(ctx)
 }
 
 // syncInterval returns the sync interval to use, falling back through
