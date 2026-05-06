@@ -40,6 +40,9 @@ func TestBuildCSS_DefaultDarkPalette_Scale1_2(t *testing.T) {
 	if !strings.Contains(css, ".glsbw-subtitle") {
 		t.Errorf("expected .glsbw-subtitle selector")
 	}
+	if !strings.Contains(css, ".glsbw-empty") {
+		t.Errorf("expected .glsbw-empty selector")
+	}
 	if !strings.Contains(css, ".glsbw-status") {
 		t.Errorf("expected .glsbw-status selector")
 	}

@@ -241,7 +241,7 @@ func TestStatusFromEvent_SyncChecking(t *testing.T) {
 func TestStatusFromEvent_SyncUpdated(t *testing.T) {
 	evt := in.Event{Kind: in.SyncUpdated}
 	vm := StatusFromEvent(evt)
-	require.Equal(t, "Vault updated", vm.Text)
+	require.Equal(t, "Vault synced", vm.Text)
 	require.False(t, vm.Syncing)
 }
 
@@ -283,6 +283,22 @@ func TestStatusFromEvent_ConflictDetected(t *testing.T) {
 	require.Equal(t, "Conflict detected", vm.Text)
 	require.False(t, vm.Syncing)
 	require.Equal(t, 2, vm.ConflictCount)
+}
+
+func TestStatusFromEvent_CacheLoaded(t *testing.T) {
+	evt := in.Event{Kind: in.CacheLoaded}
+	vm := StatusFromEvent(evt)
+	require.Equal(t, "Cache loaded — checking sync…", vm.Text)
+	require.True(t, vm.Offline)
+	require.True(t, vm.Syncing)
+}
+
+func TestStatusFromEvent_IndexReady(t *testing.T) {
+	evt := in.Event{Kind: in.IndexReady}
+	vm := StatusFromEvent(evt)
+	require.Equal(t, "Search ready", vm.Text)
+	require.True(t, vm.Offline)
+	require.False(t, vm.Syncing)
 }
 
 // --- DetailFromItem ---

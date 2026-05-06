@@ -156,7 +156,7 @@ func StatusFromEvent(evt in.Event) StatusViewModel {
 	case in.SyncChecking:
 		return StatusViewModel{Text: "Checking for updates…", Syncing: true}
 	case in.SyncUpdated:
-		return StatusViewModel{Text: "Vault updated", Syncing: false}
+		return StatusViewModel{Text: "Vault synced", Syncing: false}
 	case in.SyncFailed:
 		msg := coreerrors.ShortErrorText(evt.Message)
 		if msg == coreerrors.ShortGenericError {
@@ -175,6 +175,16 @@ func StatusFromEvent(evt in.Event) StatusViewModel {
 			Syncing:       false,
 			ConflictCount: evt.Count,
 		}
+	case in.CacheLoaded:
+		return StatusViewModel{Text: "Cache loaded — checking sync…", Offline: true, Syncing: true}
+	case in.IndexReady:
+		return StatusViewModel{Text: "Search ready", Offline: true}
+	case in.Locked:
+		return StatusViewModel{Text: "Locked", Offline: true}
+	case in.Relocked:
+		return StatusViewModel{Text: "Relocked", Offline: true}
+	case in.Unlocking:
+		return StatusViewModel{Text: "Unlocking…", Syncing: true}
 	default:
 		return StatusViewModel{Text: "", Syncing: false}
 	}

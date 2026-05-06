@@ -922,9 +922,13 @@ func (v *View) loadAllItems() {
 		rows := RowsFromItems(items)
 		idleAddOnce(func() {
 			v.mu.Lock()
+			syncing := v.state.Status.Syncing
+			v.state.Query = ""
 			v.state.SetRows(rows)
+			v.state.SetStatus(ReadyStatus(len(items), syncing))
 			v.mu.Unlock()
 			v.renderRows()
+			v.renderStatus()
 		})
 	}()
 }
@@ -967,6 +971,7 @@ func (v *View) doSearch(query string) {
 		rows := RowsFromScored(results)
 		idleAddOnce(func() {
 			v.mu.Lock()
+			v.state.Query = query
 			v.state.SetRows(rows)
 			v.mu.Unlock()
 			v.renderRows()
@@ -1067,6 +1072,16 @@ func (v *View) renderRows() {
 			break
 		}
 		v.rowsBox.Remove(child)
+	}
+
+	if len(v.state.Rows) == 0 {
+		emptyText := EmptyRowsText(v.state.Query, v.state.Status)
+		emptyLabel := gtklib.NewLabel(&emptyText)
+		emptyLabel.SetHalign(gtklib.AlignCenterValue)
+		emptyLabel.SetXalign(0.5)
+		emptyLabel.GetStyleContext().AddClass("glsbw-empty")
+		v.rowsBox.Append(&emptyLabel.Widget)
+		return
 	}
 
 	for i, row := range v.state.Rows {
@@ -1628,12 +1643,31 @@ func (v *View) eventLoop(ctx context.Context) {
 				return
 			}
 			st := StatusFromEvent(evt)
+			refreshRows := ShouldRefreshRowsOnEvent(evt.Kind)
 			idleAddOnce(func() {
 				v.mu.Lock()
 				v.state.SetStatus(st)
+				mode := v.state.Mode
 				v.mu.Unlock()
 				v.renderStatus()
+				// This idle callback runs on the GTK main thread. Snapshotting Mode
+				// before releasing v.mu avoids holding the lock while refreshSearchRows
+				// reads GTK widgets and starts async service work.
+				if refreshRows && mode == ModeSearch {
+					v.refreshSearchRows()
+				}
 			})
 		}
 	}
+}
+
+// refreshSearchRows reloads the visible search list after cache/index/sync
+// changes. It must be called on the GTK thread so reading searchEntry is safe.
+func (v *View) refreshSearchRows() {
+	query := v.searchEntry.GetText()
+	if query == "" {
+		v.loadAllItems()
+		return
+	}
+	v.doSearch(query)
 }

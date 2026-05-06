@@ -99,6 +99,12 @@ textview:focus, textview:focus-within {
   opacity: 0.75;
 }
 
+.glsbw-empty {
+  color: var(--glsbw-fg);
+  opacity: 0.65;
+  padding: calc(var(--glsbw-scale) * 1.5em) var(--glsbw-padding);
+}
+
 .glsbw-status {
   color: var(--glsbw-status-ok);
 }
