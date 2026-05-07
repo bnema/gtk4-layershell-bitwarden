@@ -12,6 +12,7 @@ import (
 	"github.com/bnema/puregotk/v4/gdk"
 	gobject "github.com/bnema/puregotk/v4/gobject"
 	gtklib "github.com/bnema/puregotk/v4/gtk"
+	"github.com/bnema/puregotk/v4/pango"
 
 	clipadapter "github.com/bnema/gtk4-layershell-bitwarden/internal/adapters/clipboard"
 	"github.com/bnema/gtk4-layershell-bitwarden/internal/core/auth"
@@ -1423,23 +1424,50 @@ func (v *View) renderRows() {
 
 // buildRowWidget creates a single row widget.
 func (v *View) buildRowWidget(row Row, selected bool) *gtklib.Box {
-	hbox := gtklib.NewBox(gtklib.OrientationHorizontalValue, 4)
+	hbox := gtklib.NewBox(gtklib.OrientationHorizontalValue, 8)
 	hbox.GetStyleContext().AddClass("glsbw-row")
 
-	title := row.Title
-	if subtitle := row.Subtitle; subtitle != "" {
-		title = title + " — " + subtitle
+	mainBox := gtklib.NewBox(gtklib.OrientationHorizontalValue, 10)
+	mainBox.GetStyleContext().AddClass("glsbw-row-main")
+	mainBox.SetHexpand(true)
+	mainBox.SetValign(gtklib.AlignCenterValue)
+	if icon := buildTypeIcon(row.Type); icon != nil {
+		mainBox.Append(&icon.Widget)
 	}
-	label := gtklib.NewLabel(&title)
-	label.GetStyleContext().AddClass("glsbw-title")
-	label.SetHalign(gtklib.AlignStartValue)
-	label.SetXalign(0)
-	hbox.Append(&label.Widget)
+
+	textBox := gtklib.NewBox(gtklib.OrientationVerticalValue, 2)
+	textBox.GetStyleContext().AddClass("glsbw-row-text")
+	textBox.SetHexpand(true)
+	textBox.SetValign(gtklib.AlignCenterValue)
+
+	titleLabel := gtklib.NewLabel(&row.Title)
+	titleLabel.GetStyleContext().AddClass("glsbw-title")
+	titleLabel.SetHalign(gtklib.AlignStartValue)
+	titleLabel.SetXalign(0)
+	titleLabel.SetHexpand(true)
+	titleLabel.SetSingleLineMode(true)
+	titleLabel.SetEllipsize(pango.EllipsizeEndValue)
+	textBox.Append(&titleLabel.Widget)
+
+	if row.Subtitle != "" {
+		subtitleLabel := gtklib.NewLabel(&row.Subtitle)
+		subtitleLabel.GetStyleContext().AddClass("glsbw-subtitle")
+		subtitleLabel.SetHalign(gtklib.AlignStartValue)
+		subtitleLabel.SetXalign(0)
+		subtitleLabel.SetHexpand(true)
+		subtitleLabel.SetSingleLineMode(true)
+		subtitleLabel.SetEllipsize(pango.EllipsizeEndValue)
+		textBox.Append(&subtitleLabel.Widget)
+	}
+
+	mainBox.Append(&textBox.Widget)
+	hbox.Append(&mainBox.Widget)
 
 	if row.Badge != "" {
 		badge := gtklib.NewLabel(&row.Badge)
 		badge.GetStyleContext().AddClass("glsbw-badge")
 		badge.SetHalign(gtklib.AlignEndValue)
+		badge.SetValign(gtklib.AlignCenterValue)
 		hbox.Append(&badge.Widget)
 	}
 

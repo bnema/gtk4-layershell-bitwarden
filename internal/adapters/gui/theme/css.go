@@ -290,6 +290,20 @@ spinbutton.glsbw-spin:focus-within {
   border-left-color: var(--glsbw-accent);
 }
 
+.glsbw-row-main,
+.glsbw-row-text {
+  min-width: 0;
+}
+
+.glsbw-type-icon {
+  color: var(--glsbw-fg-muted);
+}
+
+.glsbw-row:selected .glsbw-type-icon,
+.glsbw-row.selected .glsbw-type-icon {
+  color: var(--glsbw-fg);
+}
+
 .glsbw-title {
   font-weight: 600;
   color: var(--glsbw-fg);
@@ -298,6 +312,12 @@ spinbutton.glsbw-spin:focus-within {
 .glsbw-subtitle {
   font-size: 0.85em;
   color: var(--glsbw-fg-muted);
+}
+
+.glsbw-row:selected .glsbw-subtitle,
+.glsbw-row.selected .glsbw-subtitle {
+  color: var(--glsbw-fg);
+  opacity: 0.78;
 }
 
 .glsbw-badge {
