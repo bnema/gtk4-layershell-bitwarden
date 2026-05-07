@@ -246,8 +246,14 @@ spinbutton.glsbw-spin text {
 }
 
 spinbutton.glsbw-spin button {
+  background: none;
+  background-color: transparent;
   background-image: none;
+  border: none;
+  border-radius: 0;
+  color: var(--glsbw-fg);
   box-shadow: none;
+  text-shadow: none;
 }
 
 entry.glsbw-pin-entry {

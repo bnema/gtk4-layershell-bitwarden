@@ -73,6 +73,34 @@ func TestPreferClearer_NoPrimaryNoFallbackReturnsUnavailable(t *testing.T) {
 	require.ErrorIs(t, clearer(), ErrClipboardUnavailable)
 }
 
+func TestPreferClearer_NilPrimaryDelegatesToFallback(t *testing.T) {
+	calls := make([]string, 0, 1)
+	clearer := preferClearer(nil, func() error {
+		calls = append(calls, "fallback")
+		return nil
+	})
+
+	require.NoError(t, clearer())
+	require.Equal(t, []string{"fallback"}, calls)
+}
+
+func TestPreferClearer_PrimaryErrorFallsBack(t *testing.T) {
+	calls := make([]string, 0, 2)
+	clearer := preferClearer(
+		func() error {
+			calls = append(calls, "primary")
+			return errors.New("primary failed")
+		},
+		func() error {
+			calls = append(calls, "fallback")
+			return nil
+		},
+	)
+
+	require.NoError(t, clearer())
+	require.Equal(t, []string{"primary", "fallback"}, calls)
+}
+
 func TestPreferClearer_PrimarySuccessSkipsFallback(t *testing.T) {
 	calls := make([]string, 0, 2)
 	clearer := preferClearer(
@@ -127,4 +155,17 @@ func TestWlCopySetter_DoesNotRetryOnOtherErrors(t *testing.T) {
 	err := setter("secret")
 	require.ErrorIs(t, err, wantErr)
 	require.Equal(t, 1, calls)
+}
+
+func TestWlCopyClearer_PropagatesWrappedError(t *testing.T) {
+	calls := make([][]string, 0, 1)
+	wantErr := &wlCopyCommandError{err: errors.New("exit status 1"), stderr: "no clipboard"}
+	clearer := wlCopyClearerWithRunner(func(args ...string) error {
+		calls = append(calls, append([]string(nil), args...))
+		return wantErr
+	})
+
+	err := clearer()
+	require.ErrorIs(t, err, wantErr)
+	require.Equal(t, [][]string{{"--clear"}}, calls)
 }

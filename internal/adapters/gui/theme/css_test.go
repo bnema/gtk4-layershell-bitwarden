@@ -49,6 +49,9 @@ func TestBuildCSS_DefaultDarkPalette_Scale1_2(t *testing.T) {
 	if !strings.Contains(css, "spinbutton.glsbw-spin") {
 		t.Errorf("expected themed spinbutton selector")
 	}
+	if !strings.Contains(css, "spinbutton.glsbw-spin button") {
+		t.Errorf("expected themed spinbutton button selector")
+	}
 	if !strings.Contains(css, ".glsbw-title") {
 		t.Errorf("expected .glsbw-title selector")
 	}
@@ -127,6 +130,19 @@ func TestBuildCSS_DarkInputsUsePaletteColors(t *testing.T) {
 	}
 	if !strings.Contains(css, "spinbutton.glsbw-spin text") {
 		t.Fatalf("expected spinbutton text styling selector in CSS")
+	}
+	spinButtonBlock := cssBlock(css, "spinbutton.glsbw-spin button")
+	if spinButtonBlock == "" {
+		t.Fatalf("expected spinbutton.glsbw-spin button block in CSS")
+	}
+	for _, expected := range []string{
+		"background-color: transparent",
+		"border: none",
+		"text-shadow: none",
+	} {
+		if !strings.Contains(spinButtonBlock, expected) {
+			t.Fatalf("expected %q in spinbutton button block", expected)
+		}
 	}
 	if !strings.Contains(css, "--glsbw-bg-input:") {
 		t.Fatalf("expected input background variable in CSS")
@@ -209,6 +225,20 @@ func TestBuildCSS_IncludesStatusColorVariables(t *testing.T) {
 			t.Errorf("expected status color %s in CSS", expected)
 		}
 	}
+}
+
+func cssBlock(css, selector string) string {
+	needle := selector + " {"
+	start := strings.Index(css, needle)
+	if start == -1 {
+		return ""
+	}
+	rest := css[start:]
+	end := strings.Index(rest, "}\n")
+	if end == -1 {
+		return rest
+	}
+	return rest[:end+1]
 }
 
 // TestBuildCSS_IncludesStatusSelectors is intentionally removed as a duplicate.

@@ -3,6 +3,7 @@ package clipboard
 import (
 	"bytes"
 	"errors"
+	"io"
 	"os/exec"
 	"strings"
 )
@@ -12,6 +13,8 @@ const wlCopyBinary = "wl-copy"
 var ErrClipboardUnavailable = errors.New("clipboard: no clipboard backend available")
 
 type wlCopyRunner func(text string, args ...string) error
+
+type wlCopyClearRunner func(args ...string) error
 
 type wlCopyCommandError struct {
 	err    error
@@ -86,14 +89,28 @@ func wlCopySetterWithRunner(run wlCopyRunner) Setter {
 }
 
 func wlCopyClearer() Clearer {
+	return wlCopyClearerWithRunner(runWlCopyClear)
+}
+
+func wlCopyClearerWithRunner(run wlCopyClearRunner) Clearer {
 	return func() error {
-		return exec.Command(wlCopyBinary, "--clear").Run()
+		return run("--clear")
 	}
 }
 
 func runWlCopy(text string, args ...string) error {
+	return runWlCopyCommand(strings.NewReader(text), args...)
+}
+
+func runWlCopyClear(args ...string) error {
+	return runWlCopyCommand(nil, args...)
+}
+
+func runWlCopyCommand(stdin io.Reader, args ...string) error {
 	cmd := exec.Command(wlCopyBinary, args...)
-	cmd.Stdin = strings.NewReader(text)
+	if stdin != nil {
+		cmd.Stdin = stdin
+	}
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
