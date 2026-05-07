@@ -18,6 +18,7 @@ const (
 var (
 	ErrNoCharsetEnabled = errors.New("passwordgen: at least one character set must be enabled")
 	ErrLengthTooShort   = errors.New("passwordgen: length must be at least the number of enabled character sets")
+	errEmptyCharset     = errors.New("passwordgen: charset must not be empty")
 )
 
 type Options struct {
@@ -103,6 +104,9 @@ func (o Options) enabledCharsets() []string {
 }
 
 func randomByte(r io.Reader, charset string) (byte, error) {
+	if len(charset) == 0 {
+		return 0, errEmptyCharset
+	}
 	idx, err := randomIndex(r, len(charset))
 	if err != nil {
 		return 0, err

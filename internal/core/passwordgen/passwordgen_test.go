@@ -109,6 +109,28 @@ func TestGenerateWithReader_PropagatesEntropyError(t *testing.T) {
 	require.True(t, errors.Is(err, io.ErrUnexpectedEOF))
 }
 
+func TestRandomByte_EmptyCharsetReturnsError(t *testing.T) {
+	var (
+		b   byte
+		err error
+	)
+
+	require.NotPanics(t, func() {
+		b, err = randomByte(failingReader{}, "")
+	})
+	require.Zero(t, b)
+	require.Error(t, err)
+	require.ErrorContains(t, err, "charset")
+}
+
+func TestIsSymbol_UsesConfiguredSymbolCharset(t *testing.T) {
+	require.True(t, isSymbol('!'))
+	require.True(t, isSymbol('^'))
+	require.False(t, isSymbol('_'))
+	require.False(t, isSymbol('a'))
+	require.False(t, isSymbol('7'))
+}
+
 func containsClass(password string, match func(rune) bool) bool {
 	for _, r := range password {
 		if match(r) {
@@ -131,5 +153,10 @@ func isDigit(r rune) bool {
 }
 
 func isSymbol(r rune) bool {
-	return !isLower(r) && !isUpper(r) && !isDigit(r)
+	for _, candidate := range symbolChars {
+		if candidate == r {
+			return true
+		}
+	}
+	return false
 }
