@@ -6,15 +6,15 @@ import (
 
 func TestDefaultAccent(t *testing.T) {
 	p := DefaultDarkPalette()
-	if p.Accent != "#f59e0b" {
-		t.Errorf("expected accent #f59e0b, got %s", p.Accent)
+	if p.Accent != "#175ddc" {
+		t.Errorf("expected accent #175ddc, got %s", p.Accent)
 	}
 }
 
 func TestDefaultBg(t *testing.T) {
 	p := DefaultDarkPalette()
-	if p.Bg != "#0f1a16" {
-		t.Errorf("expected bg #0f1a16, got %s", p.Bg)
+	if p.Bg != "#07111f" {
+		t.Errorf("expected bg #07111f, got %s", p.Bg)
 	}
 }
 
@@ -27,8 +27,8 @@ func TestApplyOverrideAccent(t *testing.T) {
 		t.Errorf("expected accent #ff0000, got %s", result.Accent)
 	}
 	// Other fields should remain unchanged
-	if result.Bg != "#0f1a16" {
-		t.Errorf("expected bg unchanged #0f1a16, got %s", result.Bg)
+	if result.Bg != "#07111f" {
+		t.Errorf("expected bg unchanged #07111f, got %s", result.Bg)
 	}
 }
 
@@ -37,8 +37,8 @@ func TestApplyOverrideEmptyValue(t *testing.T) {
 	overrides := map[string]string{"accent": ""}
 	result := ApplyOverrides(p, overrides)
 
-	if result.Accent != "#f59e0b" {
-		t.Errorf("expected accent unchanged #f59e0b for empty override, got %s", result.Accent)
+	if result.Accent != "#175ddc" {
+		t.Errorf("expected accent unchanged #175ddc for empty override, got %s", result.Accent)
 	}
 }
 
@@ -49,6 +49,7 @@ func TestApplyOverrideAllFields(t *testing.T) {
 		"fg":              "#ffffff",
 		"accent":          "#00ff00",
 		"accent_fg":       "#000000",
+		"focus":           "#00ffff",
 		"row_hover":       "#111111",
 		"row_selected":    "#222222",
 		"status_ok":       "#00ff00",
@@ -70,6 +71,9 @@ func TestApplyOverrideAllFields(t *testing.T) {
 	}
 	if result.AccentFg != "#000000" {
 		t.Errorf("accent_fg = %s", result.AccentFg)
+	}
+	if result.Focus != "#00ffff" {
+		t.Errorf("focus = %s", result.Focus)
 	}
 	if result.RowHover != "#111111" {
 		t.Errorf("row_hover = %s", result.RowHover)
@@ -97,7 +101,7 @@ func TestApplyOverrideAllFields(t *testing.T) {
 func TestApplyOverrideNoOverrides(t *testing.T) {
 	p := DefaultDarkPalette()
 	result := ApplyOverrides(p, nil)
-	if result.Accent != "#f59e0b" {
+	if result.Accent != "#175ddc" {
 		t.Errorf("expected accent unchanged with nil overrides, got %s", result.Accent)
 	}
 }
@@ -105,18 +109,24 @@ func TestApplyOverrideNoOverrides(t *testing.T) {
 func TestPaletteMap(t *testing.T) {
 	p := DefaultDarkPalette()
 	m := p.Map()
-	if m["accent"] != "#f59e0b" {
+	if m["accent"] != "#175ddc" {
 		t.Errorf("expected accent in map, got %s", m["accent"])
 	}
-	if len(m) != 11 {
-		t.Errorf("expected 11 keys in map, got %d", len(m))
+	if m["focus"] != "#2cdde9" {
+		t.Errorf("expected focus in map, got %s", m["focus"])
+	}
+	if len(m) != 12 {
+		t.Errorf("expected 12 keys in map, got %d", len(m))
 	}
 }
 
 func TestPaletteFieldValue(t *testing.T) {
 	p := DefaultDarkPalette()
-	if p.FieldValue("accent") != "#f59e0b" {
+	if p.FieldValue("accent") != "#175ddc" {
 		t.Errorf("FieldValue accent = %s", p.FieldValue("accent"))
+	}
+	if p.FieldValue("focus") != "#2cdde9" {
+		t.Errorf("FieldValue focus = %s", p.FieldValue("focus"))
 	}
 	if p.FieldValue("nonexistent") != "" {
 		t.Errorf("FieldValue nonexistent should be empty")

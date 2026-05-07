@@ -16,8 +16,8 @@ func TestBuildCSS_DefaultDarkPalette_Scale1_2(t *testing.T) {
 	if !strings.Contains(css, "em") {
 		t.Errorf("expected em unit in CSS")
 	}
-	if !strings.Contains(css, "#f59e0b") {
-		t.Errorf("expected #f59e0b accent in CSS")
+	if !strings.Contains(css, "#175ddc") {
+		t.Errorf("expected #175ddc accent in CSS")
 	}
 	if !strings.Contains(css, ".glsbw-window") {
 		t.Errorf("expected .glsbw-window selector")
@@ -73,6 +73,18 @@ func TestBuildCSS_DefaultDarkPalette_Scale1_2(t *testing.T) {
 	if !strings.Contains(css, ".glsbw-hint") {
 		t.Errorf("expected .glsbw-hint selector")
 	}
+	if !strings.Contains(css, ".glsbw-detail-title") {
+		t.Errorf("expected .glsbw-detail-title selector")
+	}
+	if !strings.Contains(css, "--glsbw-surface:") {
+		t.Errorf("expected derived surface variable")
+	}
+	if !strings.Contains(css, "--glsbw-focus:") {
+		t.Errorf("expected focus color variable")
+	}
+	if !strings.Contains(css, "border-left: 3px solid transparent") {
+		t.Errorf("expected row selection rail styling")
+	}
 	if strings.Contains(css, "max-width") {
 		t.Errorf("GTK CSS does not support max-width; use widget sizing instead")
 	}
@@ -118,21 +130,55 @@ func TestBuildCSS_DarkInputsUsePaletteColors(t *testing.T) {
 func TestBuildCSS_DerivesAccentEffectsFromPalette(t *testing.T) {
 	p := coretheme.DefaultDarkPalette()
 	p.Accent = "#336699"
+	p.Focus = "#66ccff"
+	p.StatusPending = "#ffd100"
 	p.RowSelected = "rgba(51, 102, 153, 0.10)"
 	css := BuildCSS(p, 1.0)
 
 	for _, expected := range []string{
-		"--glsbw-accent-glow: rgba(51, 102, 153, 0.08)",
-		"--glsbw-accent-hover: rgba(51, 102, 153, 0.06)",
-		"--glsbw-accent-focus: rgba(51, 102, 153, 0.30)",
-		"box-shadow: 0 8px 32px rgba(0, 0, 0, 0.50), 0 0 16px var(--glsbw-accent-glow)",
+		"--glsbw-accent-hover: rgba(51, 102, 153, 0.10)",
+		"--glsbw-accent-glow: rgba(51, 102, 153, 0.18)",
+		"--glsbw-focus: #66ccff",
+		"--glsbw-focus-ring: rgba(102, 204, 255, 0.28)",
+		"box-shadow: 0 20px 64px rgba(0, 0, 0, 0.55), 0 0 0 1px var(--glsbw-accent-glow)",
 	} {
 		if !strings.Contains(css, expected) {
 			t.Errorf("expected %q in CSS", expected)
 		}
 	}
-	if strings.Contains(css, "rgba(245, 158, 11") {
-		t.Fatalf("expected CSS not to hardcode default accent rgba values")
+	if strings.Contains(css, "rgba(23, 93, 220") {
+		t.Fatalf("expected CSS not to hardcode default Bitwarden accent rgba values")
+	}
+}
+
+func TestBuildCSS_FocusFallsBackToAccent(t *testing.T) {
+	p := coretheme.DefaultDarkPalette()
+	p.Accent = "#4477aa"
+	p.Focus = ""
+	css := BuildCSS(p, 1.0)
+
+	for _, expected := range []string{
+		"--glsbw-focus: #4477aa",
+		"--glsbw-focus-ring: rgba(68, 119, 170, 0.28)",
+	} {
+		if !strings.Contains(css, expected) {
+			t.Fatalf("expected %q in CSS", expected)
+		}
+	}
+}
+
+func TestMixHex_ClampsWeight(t *testing.T) {
+	if got := mixHex("#000000", "#ffffff", -1); got != "#000000" {
+		t.Fatalf("expected low clamp to preserve source, got %s", got)
+	}
+	if got := mixHex("#000000", "#ffffff", 2); got != "#ffffff" {
+		t.Fatalf("expected high clamp to use target, got %s", got)
+	}
+}
+
+func TestRGBAHex_SupportsShortHex(t *testing.T) {
+	if got := rgbaHex("#abc", 0.5); got != "rgba(170, 187, 204, 0.50)" {
+		t.Fatalf("expected short hex to expand correctly, got %s", got)
 	}
 }
 

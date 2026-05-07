@@ -7,6 +7,7 @@ type Palette struct {
 	Fg             string
 	Accent         string
 	AccentFg       string
+	Focus          string
 	RowHover       string
 	RowSelected    string
 	StatusOK       string
@@ -16,26 +17,27 @@ type Palette struct {
 	StatusDanger   string
 }
 
-// DefaultDarkPalette returns the default dark emerald/amber overlay palette.
+// DefaultDarkPalette returns the default dark Bitwarden-inspired overlay palette.
 func DefaultDarkPalette() Palette {
 	return Palette{
-		Bg:             "#0f1a16",
-		Fg:             "#c8e8d8",
-		Accent:         "#f59e0b",
-		AccentFg:       "#0f1a16",
-		RowHover:       "#1a3028",
-		RowSelected:    "rgba(245, 158, 11, 0.10)",
-		StatusOK:       "#4a7a66",
-		StatusPending:  "#f59e0b",
-		StatusWarning:  "#d97706",
-		StatusConflict: "#f59e0b",
-		StatusDanger:   "#e5484d",
+		Bg:             "#07111f",
+		Fg:             "#f3f6f9",
+		Accent:         "#175ddc",
+		AccentFg:       "#f3f6f9",
+		Focus:          "#2cdde9",
+		RowHover:       "#1d3358",
+		RowSelected:    "rgba(23, 93, 220, 0.22)",
+		StatusOK:       "#7bf1a8",
+		StatusPending:  "#2cdde9",
+		StatusWarning:  "#fdc700",
+		StatusConflict: "#fdc700",
+		StatusDanger:   "#ff6550",
 	}
 }
 
 // ApplyOverrides returns a copy of p with any non-empty values from overrides applied.
 // The overrides map uses snake_case keys matching the Palette field names:
-// bg, fg, accent, accent_fg, row_hover, row_selected,
+// bg, fg, accent, accent_fg, focus, row_hover, row_selected,
 // status_ok, status_pending, status_warning, status_conflict, status_danger.
 func ApplyOverrides(p Palette, overrides map[string]string) Palette {
 	if len(overrides) == 0 {
@@ -52,6 +54,9 @@ func ApplyOverrides(p Palette, overrides map[string]string) Palette {
 	}
 	if v, ok := overrides["accent_fg"]; ok && v != "" {
 		p.AccentFg = v
+	}
+	if v, ok := overrides["focus"]; ok && v != "" {
+		p.Focus = v
 	}
 	if v, ok := overrides["row_hover"]; ok && v != "" {
 		p.RowHover = v
@@ -84,6 +89,7 @@ func (p Palette) Map() map[string]string {
 		"fg":              p.Fg,
 		"accent":          p.Accent,
 		"accent_fg":       p.AccentFg,
+		"focus":           p.Focus,
 		"row_hover":       p.RowHover,
 		"row_selected":    p.RowSelected,
 		"status_ok":       p.StatusOK,
@@ -105,6 +111,8 @@ func (p Palette) FieldValue(field string) string {
 		return p.Accent
 	case "accent_fg":
 		return p.AccentFg
+	case "focus":
+		return p.Focus
 	case "row_hover":
 		return p.RowHover
 	case "row_selected":
