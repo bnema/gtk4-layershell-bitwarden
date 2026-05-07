@@ -218,12 +218,22 @@ button.glsbw-category.active {
   box-shadow: none;
 }
 
+.glsbw-pin-unlock {
+  padding: calc(var(--glsbw-scale) * 1em);
+}
+
 entry, passwordentry, searchentry, textview {
   background-color: var(--glsbw-bg-input);
   color: var(--glsbw-fg);
   border: 1px solid var(--glsbw-row-hover);
   border-radius: calc(var(--glsbw-scale) * 0.40em);
   padding: calc(var(--glsbw-scale) * 0.35em) calc(var(--glsbw-scale) * 0.65em);
+}
+
+entry.glsbw-pin-entry {
+  border-radius: calc(var(--glsbw-scale) * 0.55em);
+  font-size: 1.35em;
+  padding: calc(var(--glsbw-scale) * 0.70em) calc(var(--glsbw-scale) * 1em);
 }
 
 entry:focus, entry:focus-within,

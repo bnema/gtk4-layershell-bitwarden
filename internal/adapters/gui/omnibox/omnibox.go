@@ -193,6 +193,10 @@ func ModeForAuthStatusDetail(detail session.AuthStatusDetail, hasEmail bool) Mod
 	}
 }
 
+func modeUsesPINOnlyEntry(mode Mode) bool {
+	return mode == ModePINUnlock
+}
+
 // SetStatus updates the Status field of the state.
 func (s *State) SetStatus(st Status) {
 	s.Status = st

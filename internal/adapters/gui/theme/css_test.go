@@ -76,6 +76,12 @@ func TestBuildCSS_DefaultDarkPalette_Scale1_2(t *testing.T) {
 	if !strings.Contains(css, ".glsbw-detail-title") {
 		t.Errorf("expected .glsbw-detail-title selector")
 	}
+	if !strings.Contains(css, ".glsbw-pin-unlock") {
+		t.Errorf("expected .glsbw-pin-unlock selector")
+	}
+	if !strings.Contains(css, "entry.glsbw-pin-entry") {
+		t.Errorf("expected large PIN entry selector")
+	}
 	if !strings.Contains(css, "--glsbw-surface:") {
 		t.Errorf("expected derived surface variable")
 	}

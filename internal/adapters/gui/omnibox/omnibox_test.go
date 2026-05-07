@@ -215,6 +215,24 @@ func TestModeForAuthStatusDetail_Unauthenticated(t *testing.T) {
 	require.Equal(t, ModeUnlock, mode)
 }
 
+func TestModeUsesPINOnlyEntry(t *testing.T) {
+	require.True(t, modeUsesPINOnlyEntry(ModePINUnlock))
+
+	for _, mode := range []Mode{
+		ModeUnlock,
+		ModePINRenew,
+		ModeKeyringError,
+		ModeSearch,
+		ModeDetail,
+		ModeForm,
+		ModePINSetup,
+		ModePINConfirm,
+		ModeTwoFactor,
+	} {
+		require.False(t, modeUsesPINOnlyEntry(mode))
+	}
+}
+
 func TestModeForAuthStatusDetail_LegacyExpiredEnvelopeUsesPINUnlock(t *testing.T) {
 	detail := session.AuthStatusDetail{
 		Status:        session.LoggedInLocked,

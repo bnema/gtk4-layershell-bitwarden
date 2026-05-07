@@ -71,6 +71,10 @@ type View struct {
 }
 
 const (
+	defaultOmniboxWidth   = 640
+	pinUnlockOmniboxWidth = 340
+	pinUnlockEntryWidth   = 320
+
 	genericAuthError      = "Login failed"
 	genericOperationError = "Something went wrong"
 	genericSearchError    = "Search failed"
@@ -216,6 +220,8 @@ func New(ctx context.Context, service in.AppService, quit func(), retainFn func(
 		}
 	}
 
+	v.renderUnlockModeWidgets(v.state.Mode)
+
 	// Subscribe to service events.
 	go v.eventLoop(ctx)
 
@@ -225,7 +231,7 @@ func New(ctx context.Context, service in.AppService, quit func(), retainFn func(
 // buildUI creates all GTK widgets.
 func (v *View) buildUI() {
 	v.Root = gtklib.NewBox(gtklib.OrientationVerticalValue, 0)
-	v.Root.Widget.SetSizeRequest(640, -1)
+	v.Root.Widget.SetSizeRequest(defaultOmniboxWidth, -1)
 	styleCtx := v.Root.GetStyleContext()
 	styleCtx.AddClass("glsbw-omnibox")
 
@@ -697,7 +703,9 @@ func (v *View) GrabFocus() {
 	defer v.mu.Unlock()
 
 	switch v.state.Mode {
-	case ModeUnlock, ModePINUnlock, ModePINRenew, ModeKeyringError, ModePINSetup, ModePINConfirm, ModeTwoFactor:
+	case ModePINUnlock:
+		v.passwordEntry.GrabFocus()
+	case ModeUnlock, ModePINRenew, ModeKeyringError, ModePINSetup, ModePINConfirm, ModeTwoFactor:
 		if v.emailEntry.GetText() == "" {
 			v.emailEntry.GrabFocus()
 		} else {
@@ -747,6 +755,49 @@ func (v *View) showFormItem(item vault.Item) {
 }
 
 // --- Internal methods ---
+
+func (v *View) renderUnlockModeWidgets(mode Mode) {
+	isPINOnly := modeUsesPINOnlyEntry(mode)
+	emailVisible := !isPINOnly
+	v.emailEntry.SetVisible(emailVisible)
+
+	unlockCtx := v.unlockBox.GetStyleContext()
+	passwordCtx := v.passwordEntry.GetStyleContext()
+	if isPINOnly {
+		v.Root.Widget.SetSizeRequest(pinUnlockOmniboxWidth, -1)
+		v.passwordEntry.SetHalign(gtklib.AlignCenterValue)
+		v.passwordEntry.Widget.SetSizeRequest(pinUnlockEntryWidth, -1)
+		unlockCtx.AddClass("glsbw-pin-unlock")
+		passwordCtx.AddClass("glsbw-pin-entry")
+		return
+	}
+	v.Root.Widget.SetSizeRequest(defaultOmniboxWidth, -1)
+	v.passwordEntry.SetHalign(gtklib.AlignFillValue)
+	v.passwordEntry.Widget.SetSizeRequest(-1, -1)
+	unlockCtx.RemoveClass("glsbw-pin-unlock")
+	passwordCtx.RemoveClass("glsbw-pin-entry")
+}
+
+func (v *View) pinUnlockEmail() string {
+	email := strings.TrimSpace(v.emailEntry.GetText())
+	if email != "" {
+		return email
+	}
+	if cfg := v.service.Config(); cfg != nil {
+		return strings.TrimSpace(cfg.Bitwarden.Email)
+	}
+	return ""
+}
+
+func (v *View) enterSearchMode() {
+	v.mu.Lock()
+	v.state.Mode = ModeSearch
+	v.state.Error = ""
+	v.mu.Unlock()
+	v.render()
+	v.searchEntry.GrabFocus()
+	v.loadAllItems()
+}
 
 // showUnlock makes the unlock view visible and hides others.
 func (v *View) showUnlock() {
@@ -911,18 +962,7 @@ func (v *View) doPINRenew(ctx context.Context) {
 		}
 
 		idleAddOnce(func() {
-
-			v.mu.Lock()
-			v.state.Mode = ModeSearch
-			v.state.Error = ""
-			v.unlockBox.SetVisible(false)
-			v.searchBox.SetVisible(true)
-			v.detailBox.SetVisible(false)
-			v.formBox.SetVisible(false)
-			v.mu.Unlock()
-
-			v.searchEntry.GrabFocus()
-			v.loadAllItems()
+			v.enterSearchMode()
 		})
 	}()
 }
@@ -1056,29 +1096,22 @@ func (v *View) doPINConfirm() {
 			v.passwordEntry.SetPlaceholderText(&placeholder)
 			v.passwordEntry.SetVisibility(false)
 			v.passwordEntry.SetText("")
-
-			v.mu.Lock()
-			v.state.Mode = ModeSearch
-			v.state.Error = ""
-			v.unlockBox.SetVisible(false)
-			v.searchBox.SetVisible(true)
-			v.detailBox.SetVisible(false)
-			v.formBox.SetVisible(false)
-			v.mu.Unlock()
-
-			v.searchEntry.GrabFocus()
-			v.loadAllItems()
+			v.enterSearchMode()
 		})
 	}()
 }
 
 // doPINUnlock runs the PIN unlock flow.
 func (v *View) doPINUnlock(ctx context.Context) {
-	email := v.emailEntry.GetText()
-	pin := v.passwordEntry.GetText()
+	email := v.pinUnlockEmail()
+	pin := strings.TrimSpace(v.passwordEntry.GetText())
 
-	if email == "" || pin == "" {
-		v.showError("Email and PIN are required")
+	if pin == "" {
+		v.showError("PIN is required")
+		return
+	}
+	if email == "" {
+		v.showError("Configured email is required for PIN unlock")
 		return
 	}
 
@@ -1100,18 +1133,7 @@ func (v *View) doPINUnlock(ctx context.Context) {
 
 		idleAddOnce(func() {
 			v.passwordEntry.SetText("")
-
-			v.mu.Lock()
-			v.state.Mode = ModeSearch
-			v.state.Error = ""
-			v.unlockBox.SetVisible(false)
-			v.searchBox.SetVisible(true)
-			v.detailBox.SetVisible(false)
-			v.formBox.SetVisible(false)
-			v.mu.Unlock()
-
-			v.searchEntry.GrabFocus()
-			v.loadAllItems()
+			v.enterSearchMode()
 		})
 	}()
 }
@@ -1280,6 +1302,7 @@ func (v *View) render() {
 	mode := v.state.Mode
 	v.mu.Unlock()
 
+	v.renderUnlockModeWidgets(mode)
 	v.unlockBox.SetVisible(mode == ModeUnlock || mode == ModePINUnlock || mode == ModePINRenew || mode == ModeKeyringError || mode == ModePINSetup || mode == ModePINConfirm || mode == ModeTwoFactor)
 	v.searchBox.SetVisible(mode == ModeSearch || mode == ModeForm)
 	v.searchEntry.SetVisible(mode == ModeSearch)
