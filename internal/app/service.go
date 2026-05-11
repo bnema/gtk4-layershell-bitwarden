@@ -798,7 +798,13 @@ func (s *Service) unlock(ctx context.Context, email, password string, prompt aut
 
 	// Login via remote if configured.
 	if s.deps.Remote != nil {
-		rememberedTwoFactorToken := s.loadRememberedTwoFactorToken(ctx, email)
+		rememberedTwoFactorToken, err := s.loadRememberedTwoFactorToken(ctx, email)
+		if err != nil {
+			s.mu.Lock()
+			s.state = auth.LockStateLocked
+			s.mu.Unlock()
+			return err
+		}
 		defer clear(rememberedTwoFactorToken)
 
 		if prompt != nil {
@@ -1591,21 +1597,24 @@ func (s *Service) accountRef(email string) session.AccountRef {
 	}
 }
 
-func (s *Service) loadRememberedTwoFactorToken(ctx context.Context, email string) []byte {
+func (s *Service) loadRememberedTwoFactorToken(ctx context.Context, email string) ([]byte, error) {
 	if s.deps.Credentials == nil {
-		return nil
+		return nil, nil
 	}
 	bundle, err := s.deps.Credentials.LoadTokenBundle(ctx, s.accountRef(email))
 	if err != nil {
-		return nil
+		if errors.Is(err, cerrors.ErrNotFound) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("app: load remembered two-factor token: %w", err)
 	}
 	defer bundle.Close()
 	if len(bundle.RememberedTwoFactorToken) == 0 {
-		return nil
+		return nil, nil
 	}
 	remembered := make([]byte, len(bundle.RememberedTwoFactorToken))
 	copy(remembered, bundle.RememberedTwoFactorToken)
-	return remembered
+	return remembered, nil
 }
 
 // effectiveServerURL returns the current effective server URL based on config.

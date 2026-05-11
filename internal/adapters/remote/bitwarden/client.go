@@ -48,6 +48,11 @@ type Client struct {
 // NewClient creates a new adapter Client wrapping the SDK, configured from a
 // core config. Additional SDK options may be appended (e.g. for testing).
 func NewClient(cfg *coreconfig.Config, opts ...sdk.Option) (*Client, error) {
+	deviceIdentifier, err := effectiveDeviceIdentifier(cfg)
+	if err != nil {
+		return nil, err
+	}
+
 	var sdkOpts []sdk.Option
 
 	switch cfg.Bitwarden.Region {
@@ -66,7 +71,7 @@ func NewClient(cfg *coreconfig.Config, opts ...sdk.Option) (*Client, error) {
 		return nil, err
 	}
 
-	return &Client{sdk: sdkClient, deviceIdentifier: effectiveDeviceIdentifier(cfg)}, nil
+	return &Client{sdk: sdkClient, deviceIdentifier: deviceIdentifier}, nil
 }
 
 // NewFromSDK wraps an existing SDK client. Useful for tests and future wiring.
@@ -188,6 +193,9 @@ func classifySDKError(operation string, err error) error {
 func (c *Client) Login(ctx context.Context, email, password string, rememberedTwoFactorToken []byte) (retErr error) {
 	log, started := logRemoteStart(ctx, "login")
 	defer func() { logRemoteFinish(log, started, retErr) }()
+	if c == nil || c.sdk == nil {
+		return errors.New("bitwarden adapter: client or SDK is nil")
+	}
 	return c.sdk.Login(ctx, c.loginOptions(email, password, rememberedTwoFactorToken))
 }
 
@@ -195,6 +203,9 @@ func (c *Client) Login(ctx context.Context, email, password string, rememberedTw
 func (c *Client) BeginLogin(ctx context.Context, email, password string, rememberedTwoFactorToken []byte) (challengeResult *coreauth.TwoFactorChallenge, retErr error) {
 	log, started := logRemoteStart(ctx, "begin_login")
 	defer func() { logRemoteFinish(log, started, retErr) }()
+	if c == nil || c.sdk == nil {
+		return nil, errors.New("bitwarden adapter: client or SDK is nil")
+	}
 
 	result, err := c.sdk.BeginLogin(ctx, c.loginOptions(email, password, rememberedTwoFactorToken))
 	if err != nil {
@@ -242,11 +253,15 @@ func (c *Client) CompleteTwoFactor(ctx context.Context, _, _ string, _ bool) (re
 
 const defaultDeviceIdentifier = "gtk4-layershell-bitwarden"
 
-func effectiveDeviceIdentifier(cfg *coreconfig.Config) string {
-	if cfg != nil && strings.TrimSpace(cfg.Device.Identifier) != "" {
-		return strings.TrimSpace(cfg.Device.Identifier)
+func effectiveDeviceIdentifier(cfg *coreconfig.Config) (string, error) {
+	if cfg == nil {
+		return "", errors.New("bitwarden adapter: config is nil")
 	}
-	return defaultDeviceIdentifier
+	identifier := strings.TrimSpace(cfg.Device.Identifier)
+	if identifier == "" {
+		return "", errors.New("bitwarden adapter: device identifier is required")
+	}
+	return identifier, nil
 }
 
 func (c *Client) loginOptions(email, password string, rememberedTwoFactorToken []byte) sdk.LoginOptions {

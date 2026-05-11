@@ -82,7 +82,7 @@ func (m *Manager) decodeConfig(v *viper.Viper) *coreconfig.Config {
 		cfg.Bitwarden.Region = coreconfig.Region(r)
 	}
 	cfg.Bitwarden.ServerURL = v.GetString("bitwarden.server_url")
-	cfg.Device.Identifier = v.GetString("device.identifier")
+	cfg.Device.Identifier = strings.TrimSpace(v.GetString("device.identifier"))
 
 	// Sync
 	if d := v.GetDuration("sync.revision_check_interval"); d > 0 {
@@ -217,10 +217,10 @@ func (m *Manager) Load(ctx context.Context) (*coreconfig.Config, error) {
 		}
 	}
 
-	if cfg.Device.Identifier == "" {
+	if strings.TrimSpace(cfg.Device.Identifier) == "" {
 		identifier, genErr := generateDeviceIdentifier()
 		if genErr != nil {
-			return nil, genErr
+			return nil, fmt.Errorf("generate device identifier: %w", genErr)
 		}
 		cfg.Device.Identifier = identifier
 		if saveErr := m.saveLocked(ctx, cfg); saveErr != nil {

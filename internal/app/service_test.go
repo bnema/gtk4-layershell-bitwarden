@@ -2744,6 +2744,36 @@ func TestLoginFallsBackToPromptWhenRememberedTwoFactorNeedsFreshCode(t *testing.
 	require.Equal(t, "123456", fr.completeCode)
 }
 
+func TestLoginFailsWhenRememberedTwoFactorTokenLoadErrors(t *testing.T) {
+	fr := &fakeRemote{}
+	cs := &fakeCredentialStore{loadTokenErr: errors.New("keyring unavailable")}
+	pe := &fakePINEnvelope{result: session.UnlockEnvelope{Version: session.UnlockEnvelopeVersion, Salt: []byte("salt")}}
+	boot := &fakeBootID{id: "boot-error"}
+	fakCache := &fakeCache{loadErr: os.ErrNotExist}
+
+	svc := NewService(Deps{
+		Remote:      fr,
+		Cache:       fakCache,
+		SecretBox:   &fakeSecretBox{},
+		Credentials: cs,
+		BootID:      boot,
+		PINEnvelope: pe,
+		Config:      coreconfig.Default(),
+	})
+
+	err := svc.Login(context.Background(), auth.LoginInput{
+		Email:    "user@example.com",
+		Password: "master-password",
+		PIN:      "1234",
+	})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "load remembered two-factor token")
+
+	fr.mu.Lock()
+	defer fr.mu.Unlock()
+	require.False(t, fr.loginCalled)
+}
+
 // ---------------------------------------------------------------------------
 // UnlockWithPIN tests
 // ---------------------------------------------------------------------------

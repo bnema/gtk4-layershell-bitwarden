@@ -93,6 +93,21 @@ func TestLoadGeneratesStableDeviceIdentifier(t *testing.T) {
 	assert.Equal(t, first.Device.Identifier, second.Device.Identifier)
 }
 
+func TestLoadTrimsWhitespaceOnlyDeviceIdentifier(t *testing.T) {
+	mgr, _, cleanup := tempConfig(t)
+	defer cleanup()
+
+	cfg := coreconfig.Default()
+	cfg.Bitwarden.Email = "user@example.com"
+	cfg.Device.Identifier = "   "
+	require.NoError(t, mgr.Save(context.Background(), cfg))
+
+	loaded, err := NewManager(mgr.Path()).Load(context.Background())
+	require.NoError(t, err)
+	require.NotEmpty(t, loaded.Device.Identifier)
+	assert.NotEqual(t, "   ", loaded.Device.Identifier)
+}
+
 func TestEnvOverride(t *testing.T) {
 	mgr, _, cleanup := tempConfig(t)
 	defer cleanup()

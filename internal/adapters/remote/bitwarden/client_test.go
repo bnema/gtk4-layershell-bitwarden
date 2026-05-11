@@ -24,6 +24,7 @@ func TestNewClientRejectsInvalidSelfHostedURL(t *testing.T) {
 			Region:    coreconfig.RegionSelfHosted,
 			ServerURL: "http://bad",
 		},
+		Device: coreconfig.Device{Identifier: "device-1"},
 	}
 	_, err := NewClient(cfg)
 	require.Error(t, err, "expected error for invalid self-hosted URL")
@@ -36,6 +37,7 @@ func TestNewClientDefaultUSNoNetwork(t *testing.T) {
 			Email:  "test@example.com",
 			Region: coreconfig.RegionUS,
 		},
+		Device: coreconfig.Device{Identifier: "device-1"},
 	}
 	client, err := NewClient(cfg)
 	require.NoError(t, err)
@@ -46,6 +48,18 @@ func TestNewClientDefaultUSNoNetwork(t *testing.T) {
 	// to the same SDK method and returns nil, but we cannot assert on
 	// error alone to prove the SDK state changed.
 	assert.True(t, client.sdk.IsLocked())
+}
+
+func TestNewClientRejectsMissingDeviceIdentifier(t *testing.T) {
+	cfg := &coreconfig.Config{
+		Bitwarden: coreconfig.Bitwarden{
+			Email:  "test@example.com",
+			Region: coreconfig.RegionUS,
+		},
+	}
+	_, err := NewClient(cfg)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "device identifier is required")
 }
 
 func TestRevisionReturnsOpaqueUnknown(t *testing.T) {
@@ -148,6 +162,34 @@ func TestRemoteExportRestoreSessionRoundTrip(t *testing.T) {
 }
 
 func TestRemoteSessionMethodsNilSDKReturnError(t *testing.T) {
+	t.Run("Login nil sdk", func(t *testing.T) {
+		var c *Client
+		err := c.Login(context.Background(), "user@example.com", "password", nil)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "nil")
+	})
+
+	t.Run("Login nil sdk field", func(t *testing.T) {
+		c := &Client{sdk: nil}
+		err := c.Login(context.Background(), "user@example.com", "password", nil)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "nil")
+	})
+
+	t.Run("BeginLogin nil sdk", func(t *testing.T) {
+		var c *Client
+		_, err := c.BeginLogin(context.Background(), "user@example.com", "password", nil)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "nil")
+	})
+
+	t.Run("BeginLogin nil sdk field", func(t *testing.T) {
+		c := &Client{sdk: nil}
+		_, err := c.BeginLogin(context.Background(), "user@example.com", "password", nil)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "nil")
+	})
+
 	t.Run("ExportSession nil sdk", func(t *testing.T) {
 		var c *Client // nil
 		_, _, err := c.ExportSession(context.Background())
