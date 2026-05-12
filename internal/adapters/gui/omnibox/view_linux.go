@@ -1319,7 +1319,7 @@ func (v *View) doPrimaryAction() {
 	action := PrimaryActionFor(row, cfg)
 	switch action {
 	case ActionCopyPassword, ActionCopyUsername:
-		v.copySelectedRow(row, action, primaryActionClipboardTTL(cfg))
+		v.copySelectedRow(row, action, primaryActionClipboardTTL(cfg), cfg.Actions.CloseAfterCopy)
 	default:
 		v.mu.Lock()
 		v.state.OpenDetail()
@@ -1330,7 +1330,7 @@ func (v *View) doPrimaryAction() {
 	}
 }
 
-func (v *View) copySelectedRow(row Row, action Action, ttl time.Duration) {
+func (v *View) copySelectedRow(row Row, action Action, ttl time.Duration, closeAfterCopy bool) {
 	go func() {
 		item, err := v.service.Get(v.ctx, row.ID)
 		if err != nil {
@@ -1362,6 +1362,14 @@ func (v *View) copySelectedRow(row Row, action Action, ttl time.Duration) {
 			v.state.SetStatus(Status{Text: status})
 			v.mu.Unlock()
 			v.renderStatus()
+
+			if closeAfterCopy {
+				// Delay briefly so the content is copied to the clipboard before the overlay is closed.
+				time.AfterFunc(200*time.Millisecond, func() {
+					idleAddOnce(v.quit)
+				})
+				return
+			}
 		})
 	}()
 }
