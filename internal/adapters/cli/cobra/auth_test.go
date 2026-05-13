@@ -86,8 +86,11 @@ func (f *fakeAuthService) UnlockAndCreateEnvelope(ctx context.Context, email, pa
 func (f *fakeAuthService) RenewUnlockEnvelope(_ context.Context, _ coreauth.RenewEnvelopeInput) error {
 	return nil
 }
-func (f *fakeAuthService) Lock(context.Context) error                 { return nil }
-func (f *fakeAuthService) SoftLock(context.Context) error             { return nil }
+func (f *fakeAuthService) Lock(context.Context) error     { return nil }
+func (f *fakeAuthService) SoftLock(context.Context) error { return nil }
+func (f *fakeAuthService) SetBackgroundSyncSuspended(context.Context, bool) error {
+	return nil
+}
 func (f *fakeAuthService) HardLock(_ context.Context, _ string) error { return nil }
 func (f *fakeAuthService) Search(context.Context, string, int) ([]vault.ScoredItem, error) {
 	return nil, nil

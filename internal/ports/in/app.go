@@ -45,6 +45,7 @@ type AppService interface {
 	RenewUnlockEnvelope(ctx context.Context, input auth.RenewEnvelopeInput) error
 	Lock(ctx context.Context) error
 	SoftLock(ctx context.Context) error
+	SetBackgroundSyncSuspended(ctx context.Context, suspended bool) error
 	HardLock(ctx context.Context, email string) error
 	Search(ctx context.Context, query string, limit int) ([]vault.ScoredItem, error)
 	Items(ctx context.Context) ([]vault.Item, error)

@@ -26,26 +26,28 @@ type Deps struct {
 
 // Service implements the application's core business logic.
 type Service struct {
-	mu            sync.Mutex
-	cacheSaveMu   sync.Mutex
-	saveSeq       uint64
-	saveWG        sync.WaitGroup
-	eventMu       sync.RWMutex
-	eventsClosed  bool
-	cfg           *config.Config
-	state         auth.LockState
-	lifecycle     uint64
-	cacheKey      []byte
-	cacheSalt     []byte
-	outboxSeq     uint64
-	items         []vault.Item
-	folders       []vault.Folder
-	outbox        []coresync.OutboxMutation
-	conflicts     []coresync.Conflict
-	index         *vault.SearchIndex
-	events        chan Event
-	cancelWorkers context.CancelFunc
-	deps          Deps
+	mu                      sync.Mutex
+	cacheSaveMu             sync.Mutex
+	saveSeq                 uint64
+	saveWG                  sync.WaitGroup
+	eventMu                 sync.RWMutex
+	eventsClosed            bool
+	cfg                     *config.Config
+	state                   auth.LockState
+	lifecycle               uint64
+	cacheKey                []byte
+	cacheSalt               []byte
+	outboxSeq               uint64
+	items                   []vault.Item
+	folders                 []vault.Folder
+	outbox                  []coresync.OutboxMutation
+	conflicts               []coresync.Conflict
+	index                   *vault.SearchIndex
+	events                  chan Event
+	cancelWorkers           context.CancelFunc
+	backgroundSyncMode      backgroundSyncMode
+	backgroundSyncSuspended bool
+	deps                    Deps
 
 	pendingRemoteItems   []vault.Item
 	pendingRemoteFolders []vault.Folder

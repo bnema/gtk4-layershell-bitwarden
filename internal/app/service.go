@@ -467,10 +467,13 @@ func (s *Service) UnlockWithPIN(ctx context.Context, email, pin string) (retErr 
 	}
 
 	// 10. Install local state.
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	var workerCtx context.Context
+	var cancel context.CancelFunc
+	var startWorker bool
 
+	s.mu.Lock()
 	if s.lifecycle != token || s.state != auth.LockStateUnlocking {
+		s.mu.Unlock()
 		return fmt.Errorf("app: unlock lifecycle superseded: %w", context.Canceled)
 	}
 
@@ -479,11 +482,19 @@ func (s *Service) UnlockWithPIN(ctx context.Context, email, pin string) (retErr 
 	s.cacheKey = make([]byte, len(material.CacheKey))
 	copy(s.cacheKey, material.CacheKey)
 	s.state = auth.LockStateUnlocked
+	if s.backgroundSyncEnabledLocked() {
+		workerCtx, cancel = context.WithCancel(context.WithoutCancel(ctx))
+		s.cancelWorkers = cancel
+		s.backgroundSyncMode = backgroundSyncCacheOnly
+		s.backgroundSyncSuspended = false
+		startWorker = true
+	}
+	s.mu.Unlock()
 
-	// PIN unlock intentionally avoids background sync to prevent resident
-	// vault plaintext (s.items/s.folders) in memory for the session lifetime.
-	// Sync can be added later with operation-scoped persistence that does not
-	// pin plaintext to the resident Service state.
+	if startWorker {
+		s.startBackgroundSyncWorker(workerCtx, backgroundSyncCacheOnly)
+	}
+
 	return nil
 }
 
@@ -853,9 +864,8 @@ func (s *Service) unlock(ctx context.Context, email, password string, prompt aut
 
 	// Re-acquire lock and install state if lifecycle token still matches.
 	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	if s.lifecycle != token || s.state != auth.LockStateUnlocking {
+		s.mu.Unlock()
 		// Another Lock/Unlock cycle happened, do not install.
 		return fmt.Errorf("app: unlock lifecycle superseded: %w", context.Canceled)
 	}
@@ -879,9 +889,12 @@ func (s *Service) unlock(ctx context.Context, email, password string, prompt aut
 	// Start background sync worker detached from cancellation while preserving logger values.
 	workerCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 	s.cancelWorkers = cancel
+	s.backgroundSyncMode = backgroundSyncResident
+	s.backgroundSyncSuspended = false
 	s.emit(Unlocking, "starting sync worker")
+	s.mu.Unlock()
 
-	s.startMinimalSyncWorker(workerCtx)
+	s.startBackgroundSyncWorker(workerCtx, backgroundSyncResident)
 
 	return nil
 }
@@ -1106,6 +1119,8 @@ func (s *Service) SoftLock(ctx context.Context) (retErr error) {
 	s.index = nil
 	s.outbox = nil
 	s.conflicts = nil
+	s.backgroundSyncMode = backgroundSyncDisabled
+	s.backgroundSyncSuspended = false
 	s.state = auth.LockStateLocked
 
 	s.emit(Relocked, "vault relocked")
@@ -1317,6 +1332,8 @@ func (s *Service) Shutdown(ctx context.Context) (retErr error) {
 	s.pendingRemoteItems = nil
 	s.pendingRemoteFolders = nil
 	s.zeroCacheKeyLocked()
+	s.backgroundSyncMode = backgroundSyncDisabled
+	s.backgroundSyncSuspended = false
 	s.state = auth.LockStateLocked
 	s.mu.Unlock()
 
@@ -2613,26 +2630,4 @@ func (s *Service) syncInterval() time.Duration {
 		return cfg.Sync.RevisionCheckInterval
 	}
 	return 5 * time.Minute
-}
-
-// startMinimalSyncWorker starts a background goroutine that runs an initial
-// sync, then periodic syncs at the configured interval until ctx is done.
-func (s *Service) startMinimalSyncWorker(ctx context.Context) {
-	go func() {
-		// Run initial sync immediately.
-		s.syncOnce(ctx)
-
-		// Then run periodic syncs.
-		ticker := time.NewTicker(s.syncInterval())
-		defer ticker.Stop()
-
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				s.syncOnce(ctx)
-			}
-		}
-	}()
 }
