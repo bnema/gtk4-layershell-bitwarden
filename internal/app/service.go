@@ -996,17 +996,7 @@ func (s *Service) loadCacheData(ctx context.Context, password string) (items []v
 		}
 	}
 
-	// Deduplicate outbox mutations by ID, preserving first occurrence.
-	seen := make(map[string]struct{}, len(outbox))
-	deduped := outbox[:0]
-	for _, m := range outbox {
-		if _, ok := seen[m.ID]; ok {
-			continue
-		}
-		seen[m.ID] = struct{}{}
-		deduped = append(deduped, m)
-	}
-	outbox = deduped
+	outbox = dedupeOutboxMutations(outbox)
 
 	return items, folders, outbox, key, salt, true, nil
 }
@@ -1020,24 +1010,41 @@ func (s *Service) loadCachedVaultWithKey(ctx context.Context, key []byte) (items
 	log, started := logAppServiceStart(ctx, "cache_load_with_material")
 	defer func() { logAppServiceFinishCount(log, started, retErr, len(items)+len(folders)+len(outbox)) }()
 
-	if s.deps.Cache == nil || s.deps.SecretBox == nil {
-		return nil, nil, nil, nil
+	loadStandaloneOutbox := func(existing []coresync.OutboxMutation) []coresync.OutboxMutation {
+		if len(key) == 0 || s.deps.Outbox == nil {
+			return existing
+		}
+		storedMutations, loadErr := s.deps.Outbox.Load(ctx, key)
+		if loadErr == nil && len(storedMutations) > 0 {
+			existing = append(existing, storedMutations...)
+		}
+		if loadErr != nil {
+			log.Warn().
+				Str(zerowrap.FieldOperation, "outbox_load_with_material").
+				Str("error_kind", safelog.SafeErrorKind(loadErr)).
+				Msg("outbox load skipped")
+		}
+		return dedupeOutboxMutations(existing)
 	}
+
 	if len(key) == 0 {
 		return nil, nil, nil, nil
+	}
+	if s.deps.Cache == nil || s.deps.SecretBox == nil {
+		return nil, nil, loadStandaloneOutbox(nil), nil
 	}
 
 	snap, err := s.deps.Cache.Load(ctx)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return nil, nil, nil, nil
+			return nil, nil, loadStandaloneOutbox(nil), nil
 		}
 		return nil, nil, nil, fmt.Errorf("cache load: %w", err)
 	}
 
 	// Empty snapshot: no data to return.
 	if snap.Version == 0 && snap.AccountHash == "" && len(snap.VaultCiphertext) == 0 {
-		return nil, nil, nil, nil
+		return nil, nil, loadStandaloneOutbox(nil), nil
 	}
 
 	if err := cache.ValidateSnapshot(snap); err != nil {
@@ -1073,6 +1080,8 @@ func (s *Service) loadCachedVaultWithKey(ctx context.Context, key []byte) (items
 			return nil, nil, nil, fmt.Errorf("cache outbox decode: %w", err)
 		}
 	}
+
+	outbox = loadStandaloneOutbox(outbox)
 
 	return items, folders, outbox, nil
 }
@@ -1580,6 +1589,29 @@ func removeVaultItem(items []vault.Item, id string) []vault.Item {
 		}
 	}
 	return out
+}
+
+func removeOutboxMutationsForItem(outbox []coresync.OutboxMutation, itemID string) []coresync.OutboxMutation {
+	kept := make([]coresync.OutboxMutation, 0, len(outbox))
+	for _, mutation := range outbox {
+		if mutation.ItemID != itemID {
+			kept = append(kept, mutation)
+		}
+	}
+	return kept
+}
+
+func dedupeOutboxMutations(outbox []coresync.OutboxMutation) []coresync.OutboxMutation {
+	seen := make(map[string]struct{}, len(outbox))
+	deduped := make([]coresync.OutboxMutation, 0, len(outbox))
+	for _, mutation := range outbox {
+		if _, ok := seen[mutation.ID]; ok {
+			continue
+		}
+		seen[mutation.ID] = struct{}{}
+		deduped = append(deduped, mutation)
+	}
+	return deduped
 }
 
 func (s *Service) accountHashLocked() string {
@@ -2288,6 +2320,20 @@ func (s *Service) ResolveConflict(ctx context.Context, conflictID string, resolu
 	}()
 
 	s.mu.Lock()
+	if err := s.ensureUnlocked(); err != nil {
+		s.mu.Unlock()
+		return err
+	}
+	cacheOnly := s.backgroundSyncMode == backgroundSyncCacheOnly || (s.items == nil && s.folders == nil && s.outbox == nil && len(s.cacheKey) > 0)
+	key := append([]byte(nil), s.cacheKey...)
+	s.mu.Unlock()
+	defer clear(key)
+
+	if cacheOnly {
+		return s.resolveConflictCacheOnly(ctx, key, conflictID, resolution)
+	}
+
+	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	if err := s.ensureUnlocked(); err != nil {
@@ -2336,14 +2382,7 @@ func (s *Service) ResolveConflict(ctx context.Context, conflictID string, resolu
 				}
 			}
 		}
-		// Remove outbox mutations for this item.
-		var kept []coresync.OutboxMutation
-		for _, m := range s.outbox {
-			if m.ItemID != conflict.ItemID {
-				kept = append(kept, m)
-			}
-		}
-		s.outbox = kept
+		s.outbox = removeOutboxMutationsForItem(s.outbox, conflict.ItemID)
 
 	case coresync.ResolutionKeepLocal:
 		// Keep existing outbox mutation(s), mark local item pending and clear ConflictID.
@@ -2385,7 +2424,8 @@ func (s *Service) ResolveConflict(ctx context.Context, conflictID string, resolu
 
 			dup := localCopy
 			s.outboxSeq++
-			dup.ID = fmt.Sprintf("local-%d-%d", s.now().UnixNano(), s.outboxSeq)
+			now := s.now()
+			dup.ID = fmt.Sprintf("local-%d-%d", now.UnixNano(), s.outboxSeq)
 			dup.SyncStatus = vault.SyncStatusPending
 			dup.ConflictID = ""
 			s.items = append(s.items, dup)
@@ -2395,27 +2435,180 @@ func (s *Service) ResolveConflict(ctx context.Context, conflictID string, resolu
 				return fmt.Errorf("app: marshal duplicate payload: %w", err)
 			}
 			s.outbox = append(s.outbox, coresync.OutboxMutation{
-				ID:        fmt.Sprintf("m-%d-%d", s.now().UnixNano(), s.outboxSeq),
+				ID:        fmt.Sprintf("m-%d-%d", now.UnixNano(), s.outboxSeq),
 				Kind:      coresync.MutationCreate,
 				ItemID:    dup.ID,
-				CreatedAt: s.now(),
+				CreatedAt: now,
 				Payload:   payload,
 			})
 
 			// The original local mutation has been converted into a duplicate local
 			// create, so remove mutations targeting the remote-resolved original.
-			kept := s.outbox[:0]
-			for _, mutation := range s.outbox {
-				if mutation.ItemID != conflict.ItemID {
-					kept = append(kept, mutation)
-				}
-			}
-			s.outbox = kept
+			s.outbox = removeOutboxMutationsForItem(s.outbox, conflict.ItemID)
 		}
+
+	default:
+		return cerrors.ErrUnsupported
 	}
 
 	s.rebuildIndexLocked()
 	s.saveCacheAsyncLocked(ctx)
+	s.emit(SyncUpdated, "conflict resolved")
+	return nil
+}
+
+func (s *Service) resolveConflictCacheOnly(ctx context.Context, key []byte, conflictID string, resolution coresync.ConflictResolution) error {
+	if len(key) == 0 {
+		return fmt.Errorf("app: conflict resolve: missing cache key")
+	}
+
+	s.mu.Lock()
+	if err := s.ensureUnlocked(); err != nil {
+		s.mu.Unlock()
+		return err
+	}
+	idx := -1
+	for i, c := range s.conflicts {
+		if c.ID == conflictID {
+			idx = i
+			break
+		}
+	}
+	if idx == -1 {
+		s.mu.Unlock()
+		return cerrors.ErrNotFound
+	}
+	conflict := s.conflicts[idx]
+	expectedSeq := s.saveSeq
+	s.mu.Unlock()
+
+	snap, err := s.loadDecryptedCacheSnapshot(ctx, key)
+	if err != nil {
+		return err
+	}
+	if len(snap.Salt) == 0 {
+		return fmt.Errorf("app: conflict resolve: no cache salt available")
+	}
+	snap.Items = append([]vault.Item(nil), snap.Items...)
+	snap.Folders = append([]vault.Folder(nil), snap.Folders...)
+	snap.Outbox = append([]coresync.OutboxMutation(nil), snap.Outbox...)
+
+	var remoteItems []vault.Item
+	if resolution == coresync.ResolutionKeepRemote || resolution == coresync.ResolutionDuplicateLocal {
+		if s.deps.Remote == nil {
+			return fmt.Errorf("app: conflict resolve: remote unavailable")
+		}
+		remoteItems, _, _, err = s.deps.Remote.Sync(ctx)
+		if err != nil {
+			return err
+		}
+	}
+
+	switch resolution {
+	case coresync.ResolutionKeepRemote:
+		foundRemote := false
+		for _, remoteItem := range remoteItems {
+			if remoteItem.ID != conflict.ItemID {
+				continue
+			}
+			remoteItem.SyncStatus = vault.SyncStatusSynced
+			remoteItem.ConflictID = ""
+			snap.Items = upsertVaultItem(snap.Items, remoteItem)
+			foundRemote = true
+			break
+		}
+		if !foundRemote {
+			snap.Items = removeVaultItem(snap.Items, conflict.ItemID)
+		}
+		snap.Outbox = removeOutboxMutationsForItem(snap.Outbox, conflict.ItemID)
+
+	case coresync.ResolutionKeepLocal:
+		for i, item := range snap.Items {
+			if item.ID == conflict.ItemID {
+				snap.Items[i].SyncStatus = vault.SyncStatusPending
+				snap.Items[i].ConflictID = ""
+				break
+			}
+		}
+
+	case coresync.ResolutionDuplicateLocal:
+		var localCopy vault.Item
+		originalIdx := -1
+		for i, item := range snap.Items {
+			if item.ID == conflict.ItemID {
+				localCopy = item
+				originalIdx = i
+				break
+			}
+		}
+		if originalIdx >= 0 {
+			remoteInstalled := false
+			for _, remoteItem := range remoteItems {
+				if remoteItem.ID != conflict.ItemID {
+					continue
+				}
+				remoteItem.SyncStatus = vault.SyncStatusSynced
+				remoteItem.ConflictID = ""
+				snap.Items[originalIdx] = remoteItem
+				remoteInstalled = true
+				break
+			}
+			if !remoteInstalled {
+				snap.Items[originalIdx].SyncStatus = vault.SyncStatusSynced
+				snap.Items[originalIdx].ConflictID = ""
+			}
+
+			s.mu.Lock()
+			s.outboxSeq++
+			outboxSeq := s.outboxSeq
+			s.mu.Unlock()
+			now := s.now()
+
+			dup := localCopy
+			dup.ID = fmt.Sprintf("local-%d-%d", now.UnixNano(), outboxSeq)
+			dup.SyncStatus = vault.SyncStatusPending
+			dup.ConflictID = ""
+			snap.Items = append(snap.Items, dup)
+
+			payload, err := json.Marshal(dup)
+			if err != nil {
+				return fmt.Errorf("app: marshal duplicate payload: %w", err)
+			}
+			snap.Outbox = append(snap.Outbox, coresync.OutboxMutation{
+				ID:        fmt.Sprintf("m-%d-%d", now.UnixNano(), outboxSeq),
+				Kind:      coresync.MutationCreate,
+				ItemID:    dup.ID,
+				CreatedAt: now,
+				Payload:   payload,
+			})
+			snap.Outbox = removeOutboxMutationsForItem(snap.Outbox, conflict.ItemID)
+		}
+
+	default:
+		return cerrors.ErrUnsupported
+	}
+
+	if err := s.saveExplicitCacheSnapshot(ctx, key, snap, expectedSeq); err != nil {
+		return err
+	}
+
+	s.mu.Lock()
+	if idx >= 0 {
+		for i, c := range s.conflicts {
+			if c.ID == conflictID {
+				s.conflicts = append(s.conflicts[:i], s.conflicts[i+1:]...)
+				break
+			}
+		}
+	}
+	s.pendingRemoteItems = nil
+	s.pendingRemoteFolders = nil
+	s.items = nil
+	s.folders = nil
+	s.outbox = nil
+	s.index = nil
+	s.mu.Unlock()
+
 	s.emit(SyncUpdated, "conflict resolved")
 	return nil
 }

@@ -350,9 +350,14 @@ func (c *fakeCache) Load(_ context.Context) (cache.Snapshot, error) {
 	return cache.Snapshot{}, nil
 }
 
-func (c *fakeCache) Save(ctx context.Context, _ cache.Snapshot) error {
+func (c *fakeCache) Save(ctx context.Context, snap cache.Snapshot) error {
 	c.mu.Lock()
 	c.saveCalled++
+	snapCopy := snap
+	snapCopy.CacheKeySalt = append([]byte(nil), snap.CacheKeySalt...)
+	snapCopy.VaultCiphertext = append([]byte(nil), snap.VaultCiphertext...)
+	snapCopy.OutboxCiphertext = append([]byte(nil), snap.OutboxCiphertext...)
+	c.data = &snapCopy
 	started := c.saveStarted
 	block := c.saveBlock
 	c.mu.Unlock()
@@ -1442,6 +1447,190 @@ func TestResolveConflictDuplicateLocalQueuesCreate(t *testing.T) {
 
 	// Verify no conflicts remain.
 	require.Len(t, svc.conflictsForTest(), 0)
+}
+
+func TestResolveConflictKeepRemoteInCacheOnlySessionUpdatesEncryptedCache(t *testing.T) {
+	cacheKey := []byte("test-cache-key-32-bytes-long!")
+	conflictID := "m1_item-1"
+	localItem := vault.Item{
+		ID:           "item-1",
+		Name:         "Local Version",
+		Type:         vault.ItemTypeLogin,
+		SyncStatus:   vault.SyncStatusConflict,
+		ConflictID:   conflictID,
+		RevisionDate: time.Now().Add(-time.Hour),
+	}
+	remoteItem := vault.Item{
+		ID:           "item-1",
+		Name:         "Remote Version",
+		Type:         vault.ItemTypeLogin,
+		RevisionDate: time.Now(),
+	}
+	outbox := []coresync.OutboxMutation{{
+		ID:        "m1",
+		Kind:      coresync.MutationUpdate,
+		ItemID:    localItem.ID,
+		CreatedAt: time.Now().Add(-30 * time.Minute),
+		Payload:   []byte(`{"name":"Local Version"}`),
+	}}
+
+	snap := buildCacheSnapshotWithKeyAndOutbox(t, cacheKey, []vault.Item{localItem}, nil, outbox)
+	cacheStore := &fakeCache{data: &snap, saveStarted: make(chan struct{}, 1)}
+	svc := NewService(Deps{
+		Config:    coreconfig.Default(),
+		Remote:    &fakeRemote{syncItems: []vault.Item{remoteItem}, syncRev: "rev-2"},
+		Cache:     cacheStore,
+		SecretBox: &fakeSecretBox{},
+	})
+
+	svc.mu.Lock()
+	svc.state = auth.LockStateUnlocked
+	svc.cacheKey = append(svc.cacheKey[:0], cacheKey...)
+	svc.backgroundSyncMode = backgroundSyncCacheOnly
+	svc.conflicts = []coresync.Conflict{{
+		ID:         conflictID,
+		ItemID:     localItem.ID,
+		MutationID: outbox[0].ID,
+		Reason:     coresync.ConflictBothModified,
+	}}
+	svc.mu.Unlock()
+
+	err := svc.ResolveConflict(context.Background(), conflictID, coresync.ResolutionKeepRemote)
+	require.NoError(t, err)
+
+	select {
+	case <-cacheStore.saveStarted:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for cache save after conflict resolution")
+	}
+
+	items, folders, savedOutbox, err := svc.loadCachedVaultWithKey(context.Background(), cacheKey)
+	require.NoError(t, err)
+	require.Len(t, items, 1)
+	require.Equal(t, remoteItem.Name, items[0].Name)
+	require.Equal(t, vault.SyncStatusSynced, items[0].SyncStatus)
+	require.Empty(t, items[0].ConflictID)
+	require.Empty(t, folders)
+	require.Empty(t, savedOutbox)
+
+	svc.mu.Lock()
+	require.Nil(t, svc.items)
+	require.Nil(t, svc.outbox)
+	require.Empty(t, svc.pendingRemoteItems)
+	require.Empty(t, svc.pendingRemoteFolders)
+	require.Empty(t, svc.conflicts)
+	svc.mu.Unlock()
+}
+
+func TestLoadCachedVaultWithKeyLoadsStandaloneOutboxWithoutCacheSnapshot(t *testing.T) {
+	cacheKey := []byte("test-cache-key-32-bytes-long!")
+	pending := []coresync.OutboxMutation{{
+		ID:        "m1",
+		Kind:      coresync.MutationCreate,
+		ItemID:    "local-1",
+		CreatedAt: time.Now(),
+		Payload:   []byte(`{"id":"local-1","name":"Pending"}`),
+	}}
+
+	svc := NewService(Deps{
+		Cache:     &fakeCache{loadErr: os.ErrNotExist},
+		SecretBox: &fakeSecretBox{},
+		Outbox:    &fakeOutbox{loadData: pending},
+	})
+
+	items, folders, outbox, err := svc.loadCachedVaultWithKey(context.Background(), cacheKey)
+	require.NoError(t, err)
+	require.Empty(t, items)
+	require.Empty(t, folders)
+	require.Len(t, outbox, 1)
+	require.Equal(t, pending[0].ID, outbox[0].ID)
+}
+
+func TestSaveExplicitCacheSnapshotRequiresSaltBeforeSavingStandaloneOutbox(t *testing.T) {
+	cacheKey := []byte("test-cache-key-32-bytes-long!")
+	outboxStore := &fakeOutbox{}
+	svc := NewService(Deps{
+		Cache:     &fakeCache{data: &cache.Snapshot{}},
+		SecretBox: &fakeSecretBox{},
+		Outbox:    outboxStore,
+	})
+
+	err := svc.saveExplicitCacheSnapshot(context.Background(), cacheKey, decryptedCacheSnapshot{
+		Outbox: []coresync.OutboxMutation{{ID: "m1", Kind: coresync.MutationCreate, ItemID: "local-1"}},
+	}, 0)
+	require.Error(t, err)
+	require.Equal(t, 0, outboxStore.saveCalled)
+}
+
+func TestResolveConflictKeepRemoteCacheOnlyUpdatesEncryptedCache(t *testing.T) {
+	cacheKey := []byte("test-cache-key-32-bytes-long!")
+	localItem := vault.Item{
+		ID:           "item-1",
+		Name:         "Local Version",
+		Type:         vault.ItemTypeLogin,
+		RevisionDate: time.Now().Add(-time.Hour),
+		SyncStatus:   vault.SyncStatusConflict,
+		ConflictID:   "m1_item-1",
+	}
+	remoteItem := vault.Item{
+		ID:           "item-1",
+		Name:         "Remote Version",
+		Type:         vault.ItemTypeLogin,
+		RevisionDate: time.Now(),
+	}
+	payload, err := json.Marshal(vault.Item{ID: localItem.ID, Name: localItem.Name, Type: localItem.Type})
+	require.NoError(t, err)
+
+	snap := buildCacheSnapshotWithKeyAndOutbox(t, cacheKey, []vault.Item{localItem}, nil, []coresync.OutboxMutation{{
+		ID:        "m1",
+		Kind:      coresync.MutationUpdate,
+		ItemID:    localItem.ID,
+		CreatedAt: time.Now().Add(-30 * time.Minute),
+		Payload:   payload,
+	}})
+	cacheStore := &fakeCache{data: &snap}
+	svc := NewService(Deps{
+		Config:    coreconfig.Default(),
+		Remote:    &fakeRemote{syncItems: []vault.Item{remoteItem}, syncRev: "rev-2"},
+		Cache:     cacheStore,
+		SecretBox: &fakeSecretBox{},
+	})
+
+	svc.mu.Lock()
+	svc.state = auth.LockStateUnlocked
+	svc.cacheKey = append(svc.cacheKey[:0], cacheKey...)
+	svc.backgroundSyncMode = backgroundSyncCacheOnly
+	svc.conflicts = []coresync.Conflict{{
+		ID:         localItem.ConflictID,
+		ItemID:     localItem.ID,
+		MutationID: "m1",
+		Reason:     coresync.ConflictBothModified,
+	}}
+	svc.mu.Unlock()
+
+	require.NoError(t, svc.ResolveConflict(context.Background(), localItem.ConflictID, coresync.ResolutionKeepRemote))
+	require.Eventually(t, func() bool {
+		cacheStore.mu.Lock()
+		defer cacheStore.mu.Unlock()
+		return cacheStore.saveCalled > 0
+	}, time.Second, 10*time.Millisecond)
+
+	items, folders, outbox, err := svc.loadCachedVaultWithKey(context.Background(), cacheKey)
+	require.NoError(t, err)
+	require.Len(t, items, 1)
+	require.Equal(t, remoteItem.Name, items[0].Name)
+	require.Equal(t, vault.SyncStatusSynced, items[0].SyncStatus)
+	require.Empty(t, items[0].ConflictID)
+	require.Empty(t, folders)
+	require.Empty(t, outbox)
+
+	svc.mu.Lock()
+	require.Empty(t, svc.items)
+	require.Empty(t, svc.folders)
+	require.Empty(t, svc.outbox)
+	require.Empty(t, svc.pendingRemoteItems)
+	require.Empty(t, svc.pendingRemoteFolders)
+	svc.mu.Unlock()
 }
 
 // ---------------------------------------------------------------------------
@@ -3471,6 +3660,10 @@ func TestUnlockWithPINRequiresDeps(t *testing.T) {
 // Uses fakeSecretBox so encryption is identity; the key is recorded but
 // decrypt always succeeds with any matching-length key.
 func buildCacheSnapshotWithKey(t *testing.T, key []byte, items []vault.Item, folders []vault.Folder) cache.Snapshot {
+	return buildCacheSnapshotWithKeyAndOutbox(t, key, items, folders, nil)
+}
+
+func buildCacheSnapshotWithKeyAndOutbox(t *testing.T, key []byte, items []vault.Item, folders []vault.Folder, outbox []coresync.OutboxMutation) cache.Snapshot {
 	t.Helper()
 
 	itemsJSON, err := json.Marshal(items)
@@ -3479,11 +3672,20 @@ func buildCacheSnapshotWithKey(t *testing.T, key []byte, items []vault.Item, fol
 	foldersJSON, err := json.Marshal(folders)
 	require.NoError(t, err)
 
+	var outboxJSON []byte
+	if outbox != nil {
+		outboxJSON, err = json.Marshal(outbox)
+		require.NoError(t, err)
+	}
+
+	salt := []byte("0123456789abcdef")
 	plain := cache.PlainSnapshot{
-		AccountHash: "test-account-hash",
-		SavedAt:     time.Now(),
-		ItemsJSON:   itemsJSON,
-		FoldersJSON: foldersJSON,
+		AccountHash:  "test-account-hash",
+		SavedAt:      time.Now(),
+		CacheKeySalt: append([]byte(nil), salt...),
+		ItemsJSON:    itemsJSON,
+		FoldersJSON:  foldersJSON,
+		OutboxJSON:   outboxJSON,
 	}
 
 	plainJSON, err := json.Marshal(plain)
@@ -3497,6 +3699,7 @@ func buildCacheSnapshotWithKey(t *testing.T, key []byte, items []vault.Item, fol
 		Version:         cache.Version,
 		AccountHash:     "test-account-hash",
 		SavedAt:         time.Now(),
+		CacheKeySalt:    append([]byte(nil), salt...),
 		VaultCiphertext: ciphertext,
 	}
 }

@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 	"time"
 
@@ -10,6 +11,8 @@ import (
 	"github.com/bnema/gtk4-layershell-bitwarden/internal/core/auth"
 	coreconfig "github.com/bnema/gtk4-layershell-bitwarden/internal/core/config"
 	"github.com/bnema/gtk4-layershell-bitwarden/internal/core/session"
+	coresync "github.com/bnema/gtk4-layershell-bitwarden/internal/core/sync"
+	"github.com/bnema/gtk4-layershell-bitwarden/internal/core/vault"
 )
 
 func TestSetBackgroundSyncSuspendedUnlocked(t *testing.T) {
@@ -176,4 +179,174 @@ func TestUnlockWithPINLeavesWorkerDisabledWhenBackgroundSyncDisabled(t *testing.
 	require.Equal(t, backgroundSyncDisabled, svc.backgroundSyncMode)
 	require.Nil(t, svc.cancelWorkers)
 	svc.mu.Unlock()
+}
+
+func TestSyncOnceCacheOnlyRefreshesEncryptedCacheWithoutResidentState(t *testing.T) {
+	cacheKey := []byte("test-cache-key-32-bytes-long!")
+	cachedItem := vault.Item{ID: "item-1", Name: "GitHub", Type: vault.ItemTypeLogin}
+	refreshedItem := vault.Item{ID: "item-1", Name: "GitHub Refreshed", Type: vault.ItemTypeLogin, RevisionDate: time.Now()}
+
+	snap := buildCacheSnapshotWithKey(t, cacheKey, []vault.Item{cachedItem}, nil)
+	svc := NewService(Deps{
+		Config:    coreconfig.Default(),
+		Remote:    &fakeRemote{revisionRev: "rev-2", syncItems: []vault.Item{refreshedItem}, syncRev: "rev-2"},
+		Cache:     &fakeCache{data: &snap},
+		SecretBox: &fakeSecretBox{},
+	})
+
+	svc.mu.Lock()
+	svc.state = auth.LockStateUnlocked
+	svc.cacheKey = append(svc.cacheKey[:0], cacheKey...)
+	svc.backgroundSyncMode = backgroundSyncCacheOnly
+	svc.mu.Unlock()
+
+	svc.syncOnceCacheOnly(context.Background())
+
+	items, folders, outbox, err := svc.loadCachedVaultWithKey(context.Background(), cacheKey)
+	require.NoError(t, err)
+	require.Len(t, items, 1)
+	require.Equal(t, refreshedItem.Name, items[0].Name)
+	require.Empty(t, folders)
+	require.Empty(t, outbox)
+
+	svc.mu.Lock()
+	require.Nil(t, svc.items)
+	require.Nil(t, svc.folders)
+	require.Nil(t, svc.index)
+	svc.mu.Unlock()
+}
+
+func TestSyncOnceByModeSkipsSuspendedCacheOnlyWorker(t *testing.T) {
+	cacheKey := []byte("test-cache-key-32-bytes-long!")
+	cachedItem := vault.Item{ID: "item-1", Name: "Cached", Type: vault.ItemTypeLogin}
+	remote := &fakeRemote{
+		revisionRev: "rev-2",
+		syncItems:   []vault.Item{{ID: "item-1", Name: "Remote", Type: vault.ItemTypeLogin, RevisionDate: time.Now()}},
+		syncRev:     "rev-2",
+	}
+	snap := buildCacheSnapshotWithKey(t, cacheKey, []vault.Item{cachedItem}, nil)
+
+	svc := NewService(Deps{
+		Config:    coreconfig.Default(),
+		Remote:    remote,
+		Cache:     &fakeCache{data: &snap},
+		SecretBox: &fakeSecretBox{},
+	})
+
+	svc.mu.Lock()
+	svc.state = auth.LockStateUnlocked
+	svc.cacheKey = append(svc.cacheKey[:0], cacheKey...)
+	svc.backgroundSyncMode = backgroundSyncCacheOnly
+	svc.backgroundSyncSuspended = true
+	svc.mu.Unlock()
+
+	svc.syncOnceByMode(context.Background(), backgroundSyncCacheOnly)
+
+	require.Equal(t, int32(0), remote.syncCalled.Load())
+}
+
+func TestSyncOnceCacheOnlyMarksConflictsInEncryptedCache(t *testing.T) {
+	cacheKey := []byte("test-cache-key-32-bytes-long!")
+	localItem := vault.Item{
+		ID:           "item-1",
+		Name:         "Local Version",
+		Type:         vault.ItemTypeLogin,
+		RevisionDate: time.Now().Add(-time.Hour),
+		SyncStatus:   vault.SyncStatusPending,
+	}
+	pendingUpdate := coresync.OutboxMutation{
+		ID:        "m1",
+		Kind:      coresync.MutationUpdate,
+		ItemID:    "item-1",
+		CreatedAt: time.Now().Add(-30 * time.Minute),
+		Payload:   []byte(`{"name":"Local Version"}`),
+	}
+	remoteItem := vault.Item{
+		ID:           "item-1",
+		Name:         "Remote Version",
+		Type:         vault.ItemTypeLogin,
+		RevisionDate: time.Now(),
+	}
+
+	snap := buildCacheSnapshotWithKeyAndOutbox(t, cacheKey, []vault.Item{localItem}, nil, []coresync.OutboxMutation{pendingUpdate})
+	svc := NewService(Deps{
+		Config:    coreconfig.Default(),
+		Remote:    &fakeRemote{revisionRev: "rev-2", syncItems: []vault.Item{remoteItem}, syncRev: "rev-2"},
+		Cache:     &fakeCache{data: &snap},
+		SecretBox: &fakeSecretBox{},
+	})
+
+	svc.mu.Lock()
+	svc.state = auth.LockStateUnlocked
+	svc.cacheKey = append(svc.cacheKey[:0], cacheKey...)
+	svc.backgroundSyncMode = backgroundSyncCacheOnly
+	svc.mu.Unlock()
+
+	svc.syncOnceCacheOnly(context.Background())
+
+	items, folders, outbox, err := svc.loadCachedVaultWithKey(context.Background(), cacheKey)
+	require.NoError(t, err)
+	require.Len(t, items, 1)
+	require.Empty(t, folders)
+	require.Len(t, outbox, 1)
+	require.Equal(t, vault.SyncStatusConflict, items[0].SyncStatus)
+	require.NotEmpty(t, items[0].ConflictID)
+	require.Equal(t, pendingUpdate.ID, outbox[0].ID)
+	require.Equal(t, pendingUpdate.ItemID, outbox[0].ItemID)
+
+	svc.mu.Lock()
+	require.Len(t, svc.conflicts, 1)
+	require.Equal(t, localItem.ID, svc.conflicts[0].ItemID)
+	require.Empty(t, svc.pendingRemoteItems)
+	require.Empty(t, svc.pendingRemoteFolders)
+	svc.mu.Unlock()
+}
+
+func TestSyncOnceCacheOnlyReplaysOutboxBeforeClearingEncryptedCache(t *testing.T) {
+	cacheKey := []byte("test-cache-key-32-bytes-long!")
+	pendingItem := vault.Item{ID: "pending-1", Name: "Pending Create", Type: vault.ItemTypeLogin}
+	payload, err := json.Marshal(pendingItem)
+	require.NoError(t, err)
+
+	createCalled := make(chan struct{}, 1)
+	snap := buildCacheSnapshotWithKeyAndOutbox(t, cacheKey, nil, nil, []coresync.OutboxMutation{{
+		ID:        "m1",
+		Kind:      coresync.MutationCreate,
+		ItemID:    pendingItem.ID,
+		CreatedAt: time.Now().Add(-time.Minute),
+		Payload:   payload,
+	}})
+	svc := NewService(Deps{
+		Config: coreconfig.Default(),
+		Remote: &fakeRemote{
+			revisionRev: "rev-2",
+			syncItems:   []vault.Item{{ID: "remote-1", Name: "Remote Item", Type: vault.ItemTypeLogin, RevisionDate: time.Now()}},
+			syncRev:     "rev-2",
+			onCreate: func(_ context.Context, item vault.Item) (vault.Item, error) {
+				require.Equal(t, pendingItem.ID, item.ID)
+				createCalled <- struct{}{}
+				return vault.Item{ID: "remote-pending-1", Name: item.Name, Type: item.Type, RevisionDate: time.Now()}, nil
+			},
+		},
+		Cache:     &fakeCache{data: &snap},
+		SecretBox: &fakeSecretBox{},
+	})
+
+	svc.mu.Lock()
+	svc.state = auth.LockStateUnlocked
+	svc.cacheKey = append(svc.cacheKey[:0], cacheKey...)
+	svc.backgroundSyncMode = backgroundSyncCacheOnly
+	svc.mu.Unlock()
+
+	svc.syncOnceCacheOnly(context.Background())
+
+	_, _, outbox, err := svc.loadCachedVaultWithKey(context.Background(), cacheKey)
+	require.NoError(t, err)
+	require.Empty(t, outbox, "encrypted cache outbox should be cleared only after replay succeeds")
+
+	select {
+	case <-createCalled:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("remote.Create was not called before cache-only sync cleared the encrypted outbox")
+	}
 }
