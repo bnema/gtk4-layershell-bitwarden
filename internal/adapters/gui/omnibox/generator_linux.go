@@ -98,9 +98,7 @@ func (v *View) buildGeneratorUI() {
 }
 
 func (v *View) startPasswordGenerator() {
-	v.mu.Lock()
-	v.state.Mode = ModeGenerator
-	v.mu.Unlock()
+	v.setMode(ModeGenerator)
 
 	v.render()
 	v.updateTabStyles()

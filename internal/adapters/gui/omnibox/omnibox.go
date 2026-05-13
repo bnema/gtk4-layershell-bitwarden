@@ -198,6 +198,10 @@ func modeUsesPINOnlyEntry(mode Mode) bool {
 	return mode == ModePINUnlock
 }
 
+func syncSuspendedForMode(mode Mode) bool {
+	return mode == ModeForm
+}
+
 // SetStatus updates the Status field of the state.
 func (s *State) SetStatus(st Status) {
 	s.Status = st

@@ -240,6 +240,25 @@ func TestModeUsesPINOnlyEntry(t *testing.T) {
 	}
 }
 
+func TestSyncSuspendedForMode(t *testing.T) {
+	require.True(t, syncSuspendedForMode(ModeForm))
+
+	for _, mode := range []Mode{
+		ModeUnlock,
+		ModePINUnlock,
+		ModePINRenew,
+		ModeKeyringError,
+		ModeSearch,
+		ModeDetail,
+		ModeGenerator,
+		ModePINSetup,
+		ModePINConfirm,
+		ModeTwoFactor,
+	} {
+		require.False(t, syncSuspendedForMode(mode), "mode %v should not suspend background sync", mode)
+	}
+}
+
 func TestModeForAuthStatusDetail_LegacyExpiredEnvelopeUsesPINUnlock(t *testing.T) {
 	detail := session.AuthStatusDetail{
 		Status:        session.LoggedInLocked,

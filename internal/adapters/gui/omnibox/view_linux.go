@@ -174,6 +174,24 @@ func (v *View) resetDynamicCallbacks() {
 	v.dynamicHandlers = nil
 }
 
+func (v *View) setBackgroundSyncSuspended(suspended bool) {
+	if err := v.service.SetBackgroundSyncSuspended(v.ctx, suspended); err != nil {
+		logOverlayError(v.ctx, "set_background_sync_suspended", err)
+	}
+}
+
+func (v *View) setMode(mode Mode) {
+	v.mu.Lock()
+	v.state.Mode = mode
+	v.mu.Unlock()
+	v.setBackgroundSyncSuspended(syncSuspendedForMode(mode))
+}
+
+func (v *View) backMode() Mode {
+	v.state.Back()
+	return v.state.Mode
+}
+
 // New creates a new View, builds all GTK widgets, queries auth status to choose
 // the initial mode, and starts the event listener.
 func New(ctx context.Context, service in.AppService, quit func(), retainFn func(interface{})) *View {
@@ -454,9 +472,7 @@ func (v *View) switchMainTab(mode Mode) {
 	case ModeGenerator:
 		v.startPasswordGenerator()
 	default:
-		v.mu.Lock()
-		v.state.Mode = ModeSearch
-		v.mu.Unlock()
+		v.setMode(ModeSearch)
 		v.render()
 		v.updateTabStyles()
 		v.searchEntry.GrabFocus()
@@ -693,8 +709,9 @@ func (v *View) AttachKeyController(window *gtklib.Window) {
 
 		handleDetail := func() bool {
 			if kv == gdk.KEY_Escape || kv == gdk.KEY_BackSpace {
-				v.state.Back()
+				mode := v.backMode()
 				v.mu.Unlock()
+				v.setBackgroundSyncSuspended(syncSuspendedForMode(mode))
 				idleAddOnce(func() { v.render() })
 				return true
 			}
@@ -713,8 +730,9 @@ func (v *View) AttachKeyController(window *gtklib.Window) {
 				}
 			}
 			if kv == gdk.KEY_Escape || kv == gdk.KEY_BackSpace {
-				v.state.Back()
+				mode := v.backMode()
 				v.mu.Unlock()
+				v.setBackgroundSyncSuspended(syncSuspendedForMode(mode))
 				idleAddOnce(func() { v.render() })
 				return true
 			}
@@ -735,8 +753,9 @@ func (v *View) AttachKeyController(window *gtklib.Window) {
 
 		handleGenerator := func() bool {
 			if kv == gdk.KEY_Escape || kv == gdk.KEY_BackSpace {
-				v.state.Back()
+				mode := v.backMode()
 				v.mu.Unlock()
+				v.setBackgroundSyncSuspended(syncSuspendedForMode(mode))
 				idleAddOnce(func() { v.render() })
 				return true
 			}
@@ -823,8 +842,8 @@ func (v *View) startQuickAddLogin() {
 func (v *View) showFormItem(item vault.Item) {
 	v.mu.Lock()
 	v.currentItem = item
-	v.state.Mode = ModeForm
 	v.mu.Unlock()
+	v.setMode(ModeForm)
 
 	v.renderForm(item)
 	v.render()
@@ -869,9 +888,9 @@ func (v *View) pinUnlockEmail() string {
 
 func (v *View) enterSearchMode() {
 	v.mu.Lock()
-	v.state.Mode = ModeSearch
 	v.state.Error = ""
 	v.mu.Unlock()
+	v.setMode(ModeSearch)
 	v.render()
 	v.searchEntry.GrabFocus()
 	v.loadAllItems()
@@ -883,7 +902,7 @@ func (v *View) showUnlock() {
 	v.searchBox.SetVisible(false)
 	v.detailBox.SetVisible(false)
 	v.formBox.SetVisible(false)
-	v.state.Mode = ModeUnlock
+	v.setMode(ModeUnlock)
 }
 
 // ClearSensitiveState zeroes temporarily stored setup secrets. It is safe to
