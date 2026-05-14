@@ -4,12 +4,6 @@ A keyboard-driven GTK4 layer-shell Bitwarden client for Linux Wayland desktops.
 
 The app runs as an overlay over your compositor instead of a regular window. It is built for fast vault search, copy-oriented workflows, and lightweight item editing without leaving the current workspace.
 
-## Status
-
-**v0.1.0 — early public release**
-
-This release is intended for Linux desktop users who are comfortable with early software. The core login, quick unlock, encrypted cache, search, and item edit flows are usable, but some UI workflows are still incomplete. Expect breaking changes before a stable v1.0 release.
-
 ## Build / Install Requirements
 
 | Dependency | Version / Notes |
@@ -174,8 +168,6 @@ On Wayland, the launcher re-execs itself with `libgtk4-layer-shell.so.0` in `LD_
 | `Ctrl` + `N` | Search | Create a new login item |
 | `Escape` | Any | Quit the overlay |
 | `Escape` / `Backspace` | Detail / Form | Return to search view |
-
-In v0.1.0, `copy_password` and `copy_username` write to the system clipboard through the GTK/GDK clipboard and then update the in-app status indicator. `open_url` is accepted by config validation but currently falls back to `copy_password`.
 
 ## Cache and Security Model
 
