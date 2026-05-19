@@ -2,6 +2,31 @@
 
 All notable changes to `gtk4-layershell-bitwarden` are documented here.
 
+## v0.2.0 - 2026-05-19
+
+### Added
+
+- Background sync control surface that can suspend sync while editing form data.
+- Cache-only background sync persistence for PIN-unlocked sessions.
+- Relock-on-quit flow so closing the overlay can avoid leaving a full vault session resident.
+- CLI version flag coverage and additional background sync regression tests.
+
+### Changed
+
+- Improved overlay lifecycle behavior around shutdown, sync status, and relock feedback.
+- Polished omnibox layout spacing, search input contrast, footer alignment, form margins, and shell shadow styling.
+- Constrained edit form width to the omnibox bounds.
+- Closed the overlay after successful copy actions.
+- Upgraded `bitwarden-go-sdk` to `v0.4.0`.
+- Reduced CI release workflow churn and updated `goreleaser/goreleaser-action` to v7.
+- Removed early release wording from the README.
+
+### Fixed
+
+- Persisted cache-only conflicts across relock.
+- Honored sync suspension and background sync enablement gates.
+- Hardened overlay shutdown and lifecycle edge cases.
+
 ## v0.1.0 - 2026-05-12
 
 Initial public release.
