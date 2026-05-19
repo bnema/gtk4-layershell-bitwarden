@@ -91,6 +91,12 @@ func TestBuildCSS_DefaultDarkPalette_Scale1_2(t *testing.T) {
 	if !strings.Contains(css, "--glsbw-surface:") {
 		t.Errorf("expected derived surface variable")
 	}
+	if !strings.Contains(css, "--glsbw-bg-search:") {
+		t.Errorf("expected derived search input background variable")
+	}
+	if !strings.Contains(cssBlock(css, ".glsbw-search"), "background-color: var(--glsbw-bg-search)") {
+		t.Errorf("expected search input to use its inset background variable")
+	}
 	if !strings.Contains(css, "--glsbw-focus:") {
 		t.Errorf("expected focus color variable")
 	}
@@ -165,14 +171,15 @@ func TestBuildCSS_DerivesAccentEffectsFromPalette(t *testing.T) {
 
 	for _, expected := range []string{
 		"--glsbw-accent-hover: rgba(51, 102, 153, 0.10)",
-		"--glsbw-accent-glow: rgba(51, 102, 153, 0.18)",
 		"--glsbw-focus: #66ccff",
 		"--glsbw-focus-ring: rgba(102, 204, 255, 0.28)",
-		"box-shadow: 0 20px 64px rgba(0, 0, 0, 0.55), 0 0 0 1px var(--glsbw-accent-glow)",
 	} {
 		if !strings.Contains(css, expected) {
 			t.Errorf("expected %q in CSS", expected)
 		}
+	}
+	if !strings.Contains(cssBlock(css, ".glsbw-omnibox"), "box-shadow: none") {
+		t.Fatalf("expected omnibox shell not to draw a drop shadow")
 	}
 	if strings.Contains(css, "rgba(23, 93, 220") {
 		t.Fatalf("expected CSS not to hardcode default Bitwarden accent rgba values")
