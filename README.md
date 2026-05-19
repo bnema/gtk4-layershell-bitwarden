@@ -14,19 +14,19 @@ The app runs as an overlay over your compositor instead of a regular window. It 
 | **Compositor** | Wayland compositor with `wlr-layer-shell` support, such as Sway or Hyprland |
 | **Secret Service** | Linux Secret Service keyring, such as GNOME Keyring or KWallet |
 
-Build from source:
+### Install with Go :
+
+```sh
+go install github.com/bnema/gtk4-layershell-bitwarden/cmd/gtk4-layershell-bitwarden@v0.1.0
+```
+
+### Build from source:
 
 ```sh
 git clone https://github.com/bnema/gtk4-layershell-bitwarden.git
 cd gtk4-layershell-bitwarden
 make build
 ./dist/gtk4-layershell-bitwarden --version
-```
-
-Install with Go once the repository is published and tagged:
-
-```sh
-go install github.com/bnema/gtk4-layershell-bitwarden/cmd/gtk4-layershell-bitwarden@v0.1.0
 ```
 
 Headless tests and non-GTK code can be built with the `nogtk` build tag:
@@ -37,28 +37,29 @@ go test -tags nogtk ./...
 
 ## First Run / Config
 
+Once installed, follow the interactive login flow 
+
+```sh
+gtk4-layershell-bitwarden login
+```
+
+Then launch it for the terminal, unlock with your previously defined pin and verify your vault sync with success
+
+```sh
+gtk4-layershell-bitwarden
+```
+
+(Optional) Use it in your Wayland compositor like Niri for example
+
+```kdl
+Mod+Ctrl+P hotkey-overlay-title="Password Manager: gtk4-layershell-bitwarden" { spawn "gtk4-layershell-bitwarden"; }
+```
+
 The default config path is:
 
 ```sh
 ~/.config/gtk4-layershell-bitwarden/config.toml
 ```
-
-`$XDG_CONFIG_HOME` is respected. A missing config file is not an error; built-in defaults are used and the config can be written later through the CLI or GUI.
-
-Optional starter config:
-
-```sh
-mkdir -p ~/.config/gtk4-layershell-bitwarden
-cp configs/config.example.toml ~/.config/gtk4-layershell-bitwarden/config.toml
-```
-
-For non-interactive unlock flows, configure `bitwarden.email` first:
-
-```sh
-gtk4-layershell-bitwarden config set bitwarden.email you@example.com
-```
-
-## Login / Unlock CLI Flow
 
 Common commands:
 
@@ -73,14 +74,6 @@ gtk4-layershell-bitwarden lock --hard
 gtk4-layershell-bitwarden logout
 ```
 
-`login` prompts for missing email, region (`us`, `eu`, or `self_hosted`), self-hosted server URL when needed, master password, and a local unlock PIN with confirmation. It authenticates with Bitwarden, stores account config, runs initial sync unless `--no-sync` is set, and writes encrypted cache/outbox files under the XDG cache directory.
-
-`unlock` uses the configured account and asks for the local PIN when a boot-bound quick-unlock envelope is available. When background sync is enabled, a successful PIN unlock refreshes the encrypted cache asynchronously without installing a long-lived resident plaintext vault. If the envelope is missing or invalid, run `login` again with the Bitwarden master password to recreate quick unlock.
-
-`lock` is a soft lock by default: it clears resident process state and keeps credentials, the quick-unlock envelope, encrypted cache, and encrypted outbox. Closing the overlay also performs this soft-lock step before GTK exits. `lock --hard` deletes only the quick-unlock envelope while keeping the token bundle and PIN profile.
-
-`logout` removes Bitwarden tokens, the PIN profile, the quick-unlock envelope, encrypted cache, encrypted outbox, and local account identity config. The next `login` prompts for email again.
-
 Auth flags:
 
 ```sh
@@ -92,11 +85,7 @@ Auth flags:
 --pinfile PATH        # unlock: read local PIN from a file
 ```
 
-For backward compatibility, `unlock` also accepts `--passwordenv` and `--passwordfile` as legacy aliases for PIN input. Prefer `--pinenv` and `--pinfile` for new scripts.
-
 The app does **not** use the `BW_SESSION` environment variable. Access tokens, refresh tokens, raw PINs, vault keys, and vault content are never printed to stdout or stderr.
-
-Headless servers, containers, and CI usually do not have a D-Bus session bus plus Secret Service provider. Auth commands in those environments typically fail with `keyring_unavailable`.
 
 ## Environment Overrides
 
