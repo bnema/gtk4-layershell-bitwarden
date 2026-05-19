@@ -88,6 +88,7 @@ const (
 	defaultOmniboxWidth   = 640
 	pinUnlockOmniboxWidth = 340
 	pinUnlockEntryWidth   = 320
+	formHorizontalMargin  = 14
 
 	genericAuthError      = "Login failed"
 	genericOperationError = "Something went wrong"
@@ -366,7 +367,7 @@ func (v *View) buildUI() {
 	v.Root.Append(&v.unlockBox.Widget)
 
 	// --- Search view (initially hidden) ---
-	v.searchBox = gtklib.NewBox(gtklib.OrientationVerticalValue, 4)
+	v.searchBox = gtklib.NewBox(gtklib.OrientationVerticalValue, 0)
 
 	v.buildTabs()
 	v.searchBox.Append(&v.modeTabsBox.Widget)
@@ -389,6 +390,8 @@ func (v *View) buildUI() {
 
 	// Form view shares the same content slot as search results.
 	v.formBox = gtklib.NewBox(gtklib.OrientationVerticalValue, 4)
+	v.formBox.SetMarginStart(formHorizontalMargin)
+	v.formBox.SetMarginEnd(formHorizontalMargin)
 	v.searchBox.Append(&v.formBox.Widget)
 
 	v.buildGeneratorUI()
@@ -402,11 +405,13 @@ func (v *View) buildUI() {
 	v.statusBox.GetStyleContext().AddClass("glsbw-footer")
 	v.statusLabel.SetHexpand(true)
 	v.statusLabel.SetHalign(gtklib.AlignStartValue)
+	v.statusLabel.SetValign(gtklib.AlignCenterValue)
 	v.statusBox.Append(&v.statusLabel.Widget)
 	for _, hint := range []string{"Enter copy", "^Enter details", "^N add", "Esc close"} {
 		hintText := hint
 		hintLabel := gtklib.NewLabel(&hintText)
 		hintLabel.GetStyleContext().AddClass("glsbw-hint")
+		hintLabel.SetValign(gtklib.AlignCenterValue)
 		v.statusBox.Append(&hintLabel.Widget)
 	}
 	v.searchBox.Append(&v.statusBox.Widget)

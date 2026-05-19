@@ -19,13 +19,13 @@ func BuildCSS(p coretheme.Palette, scale float64) string {
 	surface := mixHex(p.Bg, "#ffffff", 0.04)
 	surfaceRaised := mixHex(p.Bg, "#ffffff", 0.08)
 	inputBg := mixHex(p.Bg, "#ffffff", 0.10)
+	searchBg := mixHex(p.Bg, "#000000", 0.10)
 	fgMuted := mixHex(p.Fg, p.Bg, 0.25)
 	divider := rgbaHex(p.Fg, 0.08)
 	focus := p.Focus
 	if strings.TrimSpace(focus) == "" {
 		focus = p.Accent
 	}
-	accentGlow := rgbaHex(p.Accent, 0.18)
 	accentHover := rgbaHex(p.Accent, 0.10)
 	focusRing := rgbaHex(focus, 0.28)
 
@@ -48,8 +48,8 @@ func BuildCSS(p coretheme.Palette, scale float64) string {
   --glsbw-status-conflict: %s;
   --glsbw-status-danger: %s;
   --glsbw-bg-input: %s;
+  --glsbw-bg-search: %s;
   --glsbw-divider: %s;
-  --glsbw-accent-glow: %s;
   --glsbw-accent-hover: %s;
   --glsbw-focus: %s;
   --glsbw-focus-ring: %s;
@@ -78,7 +78,7 @@ window {
   background-color: var(--glsbw-bg);
   border: 1px solid var(--glsbw-row-hover);
   border-radius: calc(var(--glsbw-radius) * 1.05);
-  box-shadow: 0 20px 64px rgba(0, 0, 0, 0.55), 0 0 0 1px var(--glsbw-accent-glow);
+  box-shadow: none;
   color: var(--glsbw-fg);
   padding: 0;
 }
@@ -201,7 +201,7 @@ button.glsbw-category.active {
 }
 
 .glsbw-search {
-  background-color: var(--glsbw-surface);
+  background-color: var(--glsbw-bg-search);
   border: none;
   border-bottom: 1px solid var(--glsbw-row-hover);
   border-radius: 0;
@@ -340,7 +340,9 @@ spinbutton.glsbw-spin:focus-within {
 
 .glsbw-status {
   color: var(--glsbw-fg-muted);
-  font-size: 0.82em;
+  font-size: 0.84em;
+  min-height: calc(var(--glsbw-scale) * 1.20em);
+  padding: calc(var(--glsbw-scale) * 0.04em) 0;
 }
 
 .glsbw-conflict {
@@ -354,13 +356,16 @@ spinbutton.glsbw-spin:focus-within {
 .glsbw-footer {
   background-color: var(--glsbw-surface);
   border-top: 1px solid var(--glsbw-row-hover);
-  padding: calc(var(--glsbw-scale) * 0.45em) calc(var(--glsbw-scale) * 1em);
+  min-height: calc(var(--glsbw-scale) * 1.65em);
+  padding: calc(var(--glsbw-scale) * 0.36em) calc(var(--glsbw-scale) * 1em);
 }
 
 .glsbw-hint {
   color: var(--glsbw-fg-muted);
-  font-size: 0.78em;
+  font-size: 0.80em;
+  min-height: calc(var(--glsbw-scale) * 1.20em);
   opacity: 0.85;
+  padding: calc(var(--glsbw-scale) * 0.04em) 0;
 }
 
 .glsbw-detail-title {
@@ -374,7 +379,7 @@ spinbutton.glsbw-spin:focus-within {
 		p.Accent, p.AccentFg,
 		p.RowHover, p.RowSelected,
 		p.StatusOK, p.StatusPending, p.StatusWarning, p.StatusConflict, p.StatusDanger,
-		inputBg, divider, accentGlow, accentHover, focus, focusRing)
+		inputBg, searchBg, divider, accentHover, focus, focusRing)
 }
 
 func mixHex(color, target string, weight float64) string {
